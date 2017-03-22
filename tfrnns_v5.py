@@ -5,8 +5,8 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 import pdb
 import time
+import pandas as pd
 
-   
 def fliplr(x):
     height, width = x.get_shape().as_list() # x is a tensor
     xr = tf.reshape(x, [height, width, 1])
@@ -51,6 +51,7 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
         return new_h, new_state
 
     def get_nextstate(self, state, x):
+
         if self.wform == 'full':
             W = tf.get_variable("W", shape = [self._num_units, self._num_units], initializer = self.init )   
             Wh = tf.matmul(state,W)   
@@ -62,6 +63,10 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
             Wh = W*state
         elif self.wform == 'constant':    
             Wh = state
+        elif self.wform == 'diagonal_to_full':
+            tf.get_variable_scope().reuse_variable()
+            Wdiag = tf.get_variable("W", shape = [self._num_units]) 
+            W = tf.Variable( tf.diag(Wdiag), name = "Wfull") 
 
         U_shape = [x.get_shape().as_list()[1], self._num_units] 
         U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
@@ -185,39 +190,126 @@ class GatedWCell(tf.contrib.rnn.RNNCell):
 
 # Start class definition
 class rnn(object):
-    def __init__(self, model, wform, K , L1, L2, numlayers):  
-        self.model = model
-        self.wform = wform
-        self.K = K  
-        self.L1 = L1 
-        self.L2 = L2 
-        self.numlayers = numlayers 
-    # Define cost function
-       
-    # Function to intialize network parameters
+    def __init__(self, model_specs):
+        'model specs is a dictionary'
+        self.model_specs = model_specs
     
-    
-    def build_graph(self,x, model, wform, mapping_mode = 'seq2seq', gpu = 0 ): 
-        if mode == 'seq2seq':
-            y = tf.placeholder(tf.int32, [batchsize, None]) 
-        elif mode == 'seq2vec': 
-            y = tf.placeholder(tf.int32, [batchsize]) 
-        dropout_kps = tf.placeholder(tf.float32, [2], "dropout_params")
-        
-        yhat = self.define_model(x, model, wform, mapping_mode, dropout_kps) #Transpose or not to transpose? 
-                
-        if self.outstage == 'softmax':
-            temp = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = yhat, labels = y )
-            cost = tf.reduce_mean( temp )  
-        elif self.outstage == 'sigmoid': 
-            cost = tf.nn.sigmoid_cross_entropy_with_logits(logits = yhat, labels = y) 
+    def build_graph(self ): 
+        'this function builds a graph with the specifications in self.model_specs'
 
-    def define_model(self, x, model = 'scalar_w', wform = 'full', mapping_mode = 'seq2seq', dropout_kps = tf.constant([1,1])):  
+        d = self.model_specs #unpack the model specifications
+        with tf.device('/gpu:' + str(d['gpus'][0])):
+            if d['mapping_mode'] == 'seq2seq':
+                x = tf.placeholder(tf.float32, [None, d['batchsize'], d['L1']])
+                y = tf.placeholder(tf.int32, [None,d['batchsize']]) 
+            elif d['mapping_mode'] == 'seq2vec': 
+                x = tf.placeholder(tf.float32, [None, None, d['L1']])
+                y = tf.placeholder(tf.int32, [None]) 
+            dropout_kps = tf.placeholder(tf.float32, [2], "dropout_params")
+            seq_lens = tf.placeholder(tf.int32, [None])
+            
+            yhat = self.define_model(x, seqlens = seq_lens, dropout_kps = dropout_kps)
+                    
+            #compute the number of parameters to be trained
+            tvars = tf.trainable_variables()
+            tnparams = np.sum([np.prod(var.get_shape().as_list()) for var in tvars])
+           
+            #raise an error if we are outside the allowed range
+            if d['min_params'] > tnparams or d['max_params'] < tnparams:
+                raise num_paramsError
+            else:
+                self.tnparams = tnparams
+                self.tvars_names = [var.name for var in tvars] 
+                pdb.set_trace()
+
+            #define the cost         
+            if d['outstage'] == 'softmax':
+                temp = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = yhat, labels = y )
+                cost = tf.reduce_mean( temp )  
+            elif d['outstage'] == 'sigmoid': 
+                cost = tf.nn.sigmoid_cross_entropy_with_logits(logits = yhat, labels = y) 
+            
+            #define the optimizer
+            train_step = tf.train.AdamOptimizer(d['LR']).minimize(cost)
+            #compute the accuracies
+            preds = tf.nn.softmax(yhat) 
+            correct = tf.equal(tf.cast(tf.argmax(preds,1),tf.int32), y)
+            accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
+
+        #return the graph handles 
+        graph_handles = {'train_step':train_step,
+                         'x':x,
+                         'y':y,
+                         'cost':cost,
+                         'dropout_kps':dropout_kps,
+                         'seq_lens':seq_lens,
+                         'accuracy':accuracy}
+                         
+
+        return graph_handles
+
+
+    def define_model(self, x, seqlens ,dropout_kps = tf.constant([1,1])):  
         p1 = dropout_kps[0]
         p2 = dropout_kps[1]
+        onedir_models = ['lstm', 'gated_w', 'vanilla_rnn', 'gated_wf', 'mod_lstm']
+        bidir_models = ['bi_lstm', 'bi_mod_lstm', 'bi_gated_w', 'bi_gated_wf' ]
+       
+        # unpack model specifications 
+        d = self.model_specs
+        wform, model, K, num_layers, mapping_mode, L1, L2 = d['wform'], d['model'], d['K'], d['num_layers'], d['mapping_mode'], d['L1'], d['L2']
 
-        if case in self.recursive_models:  
-            with tf.variable_scope("LSTM") as vs: 
+        if model in bidir_models:
+            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
+            
+            if model == 'bi_lstm': 
+                fw_cell = tf.contrib.rnn.BasicLSTMCell(K, forget_bias=1.0)
+                bw_cell = tf.contrib.rnn.BasicLSTMCell(K, forget_bias=1.0)
+            elif model == 'bi_mod_lstm':
+                fw_cell = ModLSTMCell(K, initializer = initializer, wform = wform)
+                bw_cell = ModLSTMCell(K, initializer = initializer, wform = wform)
+            elif model  == 'bi_gated_w':
+                fw_cell = GatedWCell(K, initializer = initializer, wform = wform)
+                bw_cell = GatedWCell(K, initializer = initializer, wform = wform)
+            elif model  == 'bi_gated_wf':
+                fw_cell = GatedWFCell(K, initializer = initializer, wform = wform)
+                bw_cell = GatedWFCell(K, initializer = initializer, wform = wform)
+
+
+            fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell, input_keep_prob=p1)
+            bw_cell = tf.contrib.rnn.DropoutWrapper(bw_cell, input_keep_prob=p1)
+
+            fw_cell = tf.contrib.rnn.MultiRNNCell([fw_cell] * num_layers)
+            bw_cell = tf.contrib.rnn.MultiRNNCell([bw_cell] * num_layers)
+
+            fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell, output_keep_prob=p2)
+            bw_cell = tf.contrib.rnn.DropoutWrapper(bw_cell, output_keep_prob=p2)
+
+            outputs, _= tf.nn.bidirectional_dynamic_rnn(fw_cell, bw_cell, x, dtype=tf.float32, time_major = True, sequence_length = seqlens )
+            outputs = tf.concat(outputs, axis = 2) 
+
+            if mapping_mode == 'seq2vec':
+                mean_output = tf.reduce_mean(outputs, axis = 0)  
+                outputs = mean_output
+            elif mapping_mode == 'seq2seq': #this part requires work 
+                outputs = tf.transpose(outputs, [2,0,1] ) 
+                outputs = tf.unstack(outputs,axis = 2)
+                outputs = tf.concat(outputs, axis = 1)
+
+            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
+            with tf.variable_scope("output_stage"):
+                if self.model_specs['wform'] == 'diagonal_to_full':
+                    tf.get_variable_scopei().reuse_variables()
+
+                V = tf.get_variable("V", dtype= tf.float32, shape = [2*K, L2], initializer = initializer)  
+                b = tf.get_variable("b", dtype= tf.float32, shape = [L2 ], initializer = initializer)  
+
+            yhat = tf.matmul(outputs,V) + tf.reshape(b, (1, L2))
+            return yhat 
+
+
+        elif d in onedir_models:
+            with tf.variable_scope("onedir_rnn") as vs: 
                 # pdb.set_trace()
                 if finalvalid_mode:
                     num_steps = custom_numsteps 
@@ -292,61 +384,7 @@ class rnn(object):
                 else:
                     return y_hat, final_state 
 
-        elif case in self.bidirectional_models:
-            num_layers = self.num_layers
-            num_steps = self.num_steps 
-
-            #num_splits = int(x.get_shape().as_list()[1]/num_steps) 
-
-            x = tf.unstack(x)    
-            
-            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
-            wform = self.wform
-            if case == 'bi_lstm': 
-                fw_cell = tf.contrib.rnn.BasicLSTMCell(self.K, forget_bias=1.0)
-                bw_cell = tf.contrib.rnn.BasicLSTMCell(self.K, forget_bias=1.0)
-            elif case == 'bi_mod_lstm':
-                fw_cell = ModLSTMCell(self.K, initializer = initializer, wform = wform)
-                bw_cell = ModLSTMCell(self.K, initializer = initializer, wform = wform)
-            elif case == 'bi_gated_w':
-                fw_cell = GatedWCell(self.K, initializer = initializer, wform = wform)
-                bw_cell = GatedWCell(self.K, initializer = initializer, wform = wform)
-            elif case == 'bi_gated_wf':
-                fw_cell = GatedWFCell(self.K, initializer = initializer, wform = wform)
-                bw_cell = GatedWFCell(self.K, initializer = initializer, wform = wform)
-
-
-            fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell, input_keep_prob=p1)
-            bw_cell = tf.contrib.rnn.DropoutWrapper(bw_cell, input_keep_prob=p1)
-
-
-            fw_cell = tf.contrib.rnn.MultiRNNCell([fw_cell] * num_layers)
-            bw_cell = tf.contrib.rnn.MultiRNNCell([bw_cell] * num_layers)
-
-            fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell, output_keep_prob=p2)
-            bw_cell = tf.contrib.rnn.DropoutWrapper(bw_cell, output_keep_prob=p2)
-
-
-            outputs, _, _ = tf.contrib.rnn.static_bidirectional_rnn(fw_cell, bw_cell, x, dtype=tf.float32)
-
-            outputs = (tf.stack(outputs))
-            if mapping_mode == 'seq2vec':
-                mean_output = tf.transpose(tf.reduce_mean(outputs, axis = 0)) 
-                outputs = mean_output
-            elif mapping_mode == 'seq2seq':
-                outputs = tf.transpose(outputs, [2,0,1] ) 
-                outputs = tf.unstack(outputs,axis = 2)
-                outputs = tf.concat(outputs, axis = 1)
-
-            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
-            with tf.variable_scope("output_stage"):
-                V = tf.get_variable("V", dtype= tf.float32, shape = [2*self.K,self.L2 ], initializer = initializer)  
-                b = tf.get_variable("b", dtype= tf.float32, shape = [self.L2 ], initializer = initializer)  
-
-            yhat = tf.matmul(outputs,V) + tf.reshape(b, (1, self.L2))
-            return yhat 
-
-        elif case == 'multi_layer_ff':
+        elif model == 'multi_layer_ff':
             
             if not(train_mode):
                 tf.get_variable_scope().reuse_variables()
@@ -374,7 +412,8 @@ class rnn(object):
 
 
 
-        elif case == 'vector_w_conv':
+        elif model == 'vector_w_conv':
+            #heavily deprecated
             K = self.K
             T = self.T
             ntaps = self.ntaps
@@ -959,37 +998,47 @@ def load_data(task, data):
         from tensorflow.examples.tutorials.mnist import input_data
         mnist = input_data.read_data_sets("MNIST_data/", one_hot=True)
 
+
         #Train
         Trainsize = mnist.train.images.shape[0]
         images = mnist.train.images[:Trainsize, :]
-        Trainims = np.split(images.reshape(Trainsize*28,28),Trainsize,0 )
-        Trainims = np.transpose(np.asarray(Trainims),[2,0,1]) 
+        Trainims = np.split(images.reshape(Trainsize*28,28),Trainsize,0)
 
-        Trainlabels = mnist.train.labels[:Trainsize,:].transpose()  
-        Trainseq = (Trainims,Trainlabels)
+        Trainlabels = list(np.argmax(mnist.train.labels[:Trainsize,:],1))
+        lengths = [28]*Trainsize
+
+        d = {'data':Trainims, 'labels':Trainlabels, 'lengths':lengths }
+        df_train = pd.DataFrame( d )    
 
         #Test
         Testsize = mnist.test.images.shape[0]
         images = mnist.test.images[:Testsize, :] 
-        Testims = np.split(images.reshape(Testsize*28,28),Testsize,0 )
-        Testims = np.transpose(np.asarray(Testims),[2,0,1])
+        Testims = np.split(images.reshape(Testsize*28,28),Testsize,0)
     
-        Testlabels = mnist.test.labels[:Testsize,:].transpose()
-        Testseq = (Testims,Testlabels)
+        Testlabels = list(np.argmax(mnist.test.labels[:Testsize,:],1))
+        lengths = [28]*Testsize
+
+        d = {'data':Testims, 'labels':Testlabels, 'lengths':lengths }
+        df_test = pd.DataFrame( d )    
+
 
         #Validation
         Validsize = mnist.validation.images.shape[0]
         images = mnist.validation.images[:Validsize,:] 
         Validims = np.split(images.reshape(Validsize*28,28),Validsize,0 )
-        Validims = np.transpose(np.asarray(Validims),[2,0,1]) 
 
-        Validlabels = mnist.validation.labels[:Validsize,:].transpose()
-        Validseq = (Validims,Validlabels)
+        Validlabels = list(np.argmax(mnist.validation.labels[:Validsize,:],1))
+        lengths = [28]*Validsize
+
+        d = {'data':Validims, 'labels':Validlabels, 'lengths':lengths }
+        df_valid = pd.DataFrame( d )
 
         batchsize = 5000
-        L1 = Trainims.shape[0]
-        L2 = Trainlabels.shape[0]
-        outstage = 'sigmoid'
+        L1 = Trainims[0].shape[0]
+        L2 = np.max(Trainlabels) + 1
+        outstage = 'softmax'
+        mapping_mode = 'seq2vec'
+        num_steps = 28
 
     elif task == 'speech':
         filehandle = open('timit.pickle','rb')
@@ -1011,9 +1060,43 @@ def load_data(task, data):
     parameters = {'batchsize':batchsize,
                   'L1':L1,
                   'L2':L2,
-                  'outstage':outstage}
+                  'outstage':outstage,
+                  'mapping_mode':mapping_mode,
+                  'num_steps':num_steps}
 
-    return {'Train':Trainseq, 'Test':Testseq, 'Validation':Validseq}, parameters
+    return {'Train':df_train, 'Test':df_test, 'Validation':df_valid}, parameters
+
+
+class SimpleDataIterator():
+    def __init__(self, df):
+        self.df = df
+        self.size = len(self.df)
+        self.epochs = 0
+        self.shuffle()
+
+    def shuffle(self):
+        self.df = self.df.sample(frac=1).reset_index(drop=True)
+        self.cursor = 0
+
+    def next_batch(self, n, task, verbose = False):
+        if verbose:
+            print("The current cursor points to ",self.cursor," Data size is",self.size)
+
+        part = self.df.ix[self.cursor:self.cursor+n-1]
+        
+        if task == 'digits': 
+            temp = list(part['data'].values)
+            data = np.transpose(np.asarray(temp),[2,0,1])  
+            labels = part['labels'].values
+            lengths = part['lengths'].values
+        
+        if self.cursor+n >= self.size:
+            self.epochs += 1
+            self.shuffle()
+        else:
+            self.cursor += n
+
+        return data, labels, lengths
 
 
 def load_multiple_textdata(filenames):
@@ -1075,4 +1158,10 @@ def reconstruct_text(mat,fmapping):
         arg = np.argmax(mat[:,j])
         reclist.append(fmapping[arg])
     return ''.join(reclist)    
+
+class Error(Exception):
+    pass
+
+class num_paramsError(Error):
+    pass
 

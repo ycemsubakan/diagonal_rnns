@@ -12,202 +12,82 @@ from multiprocessing.pool import Pool
 import _pickle as cPickle
 from tfrnns_v5 import *
 
-def run_model(random_lr, random_K, random_num_layers, Trainseq, Validseq, Testseq, mbatchsize, gpus, task, data,vnum_steps = 2000, tnum_steps = 2000, min_params = 1e5, max_params = 1e6, count_mode = False, wform = None, model = None, p1 = 0.9, p2 = 0.9, EP = 1002,server = 'malleus'):
-    
-    #set the experiment parameters
-    model = model #model, options are 'lstm', 'gated_w', 'gru' (to be implemented), 'conv_w' (to be added), 'vanilla_RNN', 'mod_lstm' 
-    wform = wform #form of the W matrix in the model
-    EP = EP#number of iterations
-    LR = random_lr #learning rate
-    num_layers = random_num_layers #number of network layers
-    K = random_K #number of hidden units per layer 
-    if task in ['text','music','speech']:
-        num_steps = 200 #this is the mini-batchsize 
-    elif task in ['digits']:
-        num_steps = 28
-    ntaps = 100 #this is the filter length for the conv_w model (only required is model = 'conv_w') 
-    build_with_dropout = True 
-    p1 = p1 # Input keep-probability
-    p2 = p2 # Output keep_probability
-    Tgen = 1293012931#length of validation sequence in the text task 
-    if task == 'music':
-        outstage = 'sigmoid' #output stage non-linearity 
-    elif task in ['text','digits','speech']:
-        outstage = 'softmax'
-    save = True #if this is false the code does not save learned model variables  
-    train_fun = 'sgd' #? 
-    mbatchsize = mbatchsize - (mbatchsize%num_steps)
-    
-    if task in ['music','text']:
-        X_train = Trainseq[:,:-1]
-        Y_train = Trainseq[:,1:]
-
-    elif task in ['digits','speech']:
-        X_train = Trainseq[0] #concatenated images
-        Y_train = Trainseq[1] #labels
-        L2 = Y_train.shape[0] #this is the number of classes
-
-    L = X_train.shape[0]
-
-    end_idx = (X_train.shape[1])%len(gpus)
-    if end_idx!=0:
-        X_train = X_train[:,:-end_idx]
-        Y_train = Y_train[:,:-end_idx]
-
-    # Define network parameters
-    if len(gpus)==1 and train_fun=='sgd':
-        batchsize = mbatchsize 
-        T = batchsize
-    elif len(gpus)!=1 and train_fun=='sgd':
-        batchsize = mbatchsize*len(gpus)
-        T = int( batchsize/len(gpus))
-
+def model_driver(d,data):
+    """This function builds the computation graph for the specified model
+    The input is the dictionary d with fields:
+        model (model to be learnt), wform (form of the W matrices - full/diagonal/scalar/constant) 
+        K (number of states), L1 (input dimensions), L2 (output dimensions), numlayers (number of layers)
+    """
     # Reset graph
     tf.reset_default_graph()
-
-
-    # Create class object
-    myrnn = infinite_tap_rnn(K,L,ntaps, T, gpus, 'CrossEnt')
-    myrnn.num_steps = num_steps
-    myrnn.num_layers = num_layers 
-    myrnn.outstage = outstage
-    myrnn.build_with_dropout = build_with_dropout
-    myrnn.p1 = p1
-    myrnn.p2 = p2
-    myrnn.wform = wform
-    myrnn.case = model
-    myrnn.task = task
-    if task == 'digits':
-        myrnn.L2 = L2
-        myrnn.y = tf.placeholder(tf.float32, [L2,int(mbatchsize/28)], name = "out_placeholder") #overwrite on self.y definition for the digit case 
-    elif task == 'speech': 
-        myrnn.L2 = L2
-        myrnn.y = tf.placeholder(tf.float32, [L2,int(mbatchsize)], name = "out_placeholder") #overwrite on self.y definition for the digit case 
-
-    # list of recursive models implemented in the code
-    myrnn.recursive_models = ['lstm','gated_w','vanilla_rnn','gated_wf','mod_lstm']
-    myrnn.bidirectional_models = ['bi_lstm', 'bi_gated_w', 'bi_vanilla_rnn', 'bi_gated_wf', 'bi_mod_lstm'] 
-    myrnn.vary_penalty = True
-
     
-    # Initialize parameters
-    myrnn.initialize_parameters(distribution = tf.random_normal, m = 0.0, c = 0.1, case = model )
+    rnn1 = rnn( model_specs = d) 
+    rnn1_handles = rnn1.build_graph()  
+   
+    # load the data
+    tr = SimpleDataIterator(data['Train'])
+    tst = SimpleDataIterator(data['Test'])
+    valid = SimpleDataIterator(data['Validation'])
 
-    # Define model and updates
-    myrnn.multi_gpu_grad(g1 = tf.tanh, g2 = tf.nn.softmax, opt = 'Adam', learning_rate = LR, case = model, count_mode = count_mode )
-
-    if task == 'text':
-        #for test sequence
-        myrnn.final_xtest = tf.placeholder( tf.float32, [L,Testseq.shape[1]-1] , name = 'x_test')
-        with tf.device('/gpu:'+str(myrnn.gpus[0])):
-            myrnn.final_ytest, _ = myrnn.model( myrnn.final_xtest , case = model , train_mode = False, finalvalid_mode = True, custom_numsteps = tnum_steps) 
-            myrnn.final_longytest, _ = myrnn.model( myrnn.final_xtest , case = model , train_mode = False, finalvalid_mode = True, custom_numsteps = Testseq.shape[1]-1) 
-     
-        #for validation sequence
-        myrnn.final_xvalid = tf.placeholder( tf.float32, [L,Validseq.shape[1]-1] , name = 'x_valid')
-        with tf.device('/gpu:'+str(myrnn.gpus[0])):
-            myrnn.final_yvalid, _ = myrnn.model( myrnn.final_xvalid, case = model , train_mode = False, finalvalid_mode = True, custom_numsteps = vnum_steps) 
-            myrnn.final_longyvalid, _ = myrnn.model( myrnn.final_xvalid, case = model , train_mode = False, finalvalid_mode = True, custom_numsteps = Validseq.shape[1]-1) 
-    elif task in ['digits','speech']:
-        #for test sequence
-        myrnn.xtest = tf.placeholder( tf.float32, [L,Testseq[0].shape[1]] , name = 'x_test')
-        with tf.device('/gpu:'+str(myrnn.gpus[0])):
-            myrnn.ytest = myrnn.model( myrnn.xtest , case = model , train_mode = False) 
-     
-
-        #for validation sequence
-        myrnn.xvalid = tf.placeholder( tf.float32, [L,Validseq[0].shape[1]] , name = 'x_valid')
-        with tf.device('/gpu:'+str(myrnn.gpus[0])):
-            myrnn.yvalid = myrnn.model( myrnn.xvalid, case = model , train_mode = False)
-
-
-    ##########
-
-    init = tf.initialize_all_variables()
-    #saver = tf.train.Saver(myrnn.model_variables.extend(myrnn.output_stage_vars ))
-
-    #init = tf.global_variables_initializer() # Use for older version of tensorflow in nmf
-    config = tf.ConfigProto()
+    config = tf.ConfigProto(log_device_placement = True)
     config.gpu_options.allow_growth=True
     config.allow_soft_placement=True
 
-    sess = tf.InteractiveSession(config = config)
-    sess.run(init)
-    #with tf.Session() as sess:
-    
-    trainable_vars = tf.trainable_variables()
-    nparams = [np.prod(trainable_vars[i].get_shape().as_list()) for i in range(len(trainable_vars))]
-    tnparams = np.sum(nparams)
-    print('Total number of parameters to be trained = ' + str(tnparams) )
-    if count_mode == True:
-        return tnparams#If the count mode is on just count the parameters and return  
+    all_times, tr_logls, test_logls, valid_logls = [], [], [], [] 
+    with tf.Session(config = config) as sess:
+        sess.run(tf.initialize_all_variables())
+        for ep in range(d['EP']):
+            t1, tr_logl = time.time(), []
+            while tr.epochs == ep:
+                trb = tr.next_batch(n = d['batchsize'], task = d['task'], verbose = d['verbose'])      
+                feed = {rnn1_handles['x']:trb[0], rnn1_handles['y']:trb[1], rnn1_handles['seq_lens']:trb[2], rnn1_handles['dropout_kps']:d['dropout'] }         
+                tr_cost, tr_logl_temp, _ = sess.run( [rnn1_handles['cost'], rnn1_handles['accuracy'], rnn1_handles['train_step']], feed) 
+                tr_logl.append(tr_logl_temp)
 
-    if (tnparams < min_params) | (tnparams > max_params):
-        raise ValueError
-    
-    # Train the network 
-    start_time = time.time()
-    print('Training ' + model + ' with learning rate '+ str(LR) + ' K = ' + str(K) +'num_layers = ' + str(num_layers)) 
-    valid_logls, tst_logls, costs, all_times = myrnn.sgd_train(X_train, Y_train, sess, ep = EP, batchsize = batchsize, verbose = True, plot = False, Validseq = Validseq, Testseq = Testseq, task = task, Tgen = Tgen)
-    end_time = time.time() - start_time
-    print('Computation time: ' + str(end_time))
+                if d['verbose']:
+                    print("Training cost = ", tr_cost, " Training Accuracy = ", tr_logl_temp)
+            t2 = time.time()
+
+            #get training and test accuracies
+            tsb = tst.next_batch( n = tst.size, task = d['task'])  
+            vlb = valid.next_batch( n = valid.size, task = d['task'])  
+
+            tst_feed = {rnn1_handles['x']: tsb[0], rnn1_handles['y']: tsb[1], rnn1_handles['seq_lens']: tsb[2], rnn1_handles['dropout_kps']:np.array([1,1])} 
+            vld_feed = {rnn1_handles['x']: vlb[0], rnn1_handles['y']: vlb[1], rnn1_handles['seq_lens']: vlb[2], rnn1_handles['dropout_kps']:np.array([1,1])} 
    
-    #get the trainable variables after training
-    trainable_vars = tf.trainable_variables()
-
-        
-    ##
-    max_valid = np.max(np.array(valid_logls))
-    max_test = np.max( np.array(tst_logls))
-    dictionary = {'valid':  np.array(valid_logls), 
-                  'max_valid':max_valid , 
-                  'tst':  np.array(tst_logls), 
-                  'max_test':max_test, 
-                  'tr': np.array(costs), 
-                  'K':K,
-                  'L':L,
-                  'num_layers': num_layers, 
-                  'LR':LR, 
-                  'all_times':all_times, 
-                  'build_with_dropout':build_with_dropout, 
-                  'p1':p1, 
-                  'p2':p2, 
-                  'wform':wform,
-                  'num_steps': num_steps, 
-                  'model':model, 
-                  'data':data, 
-                  'EP':EP,
-                  'vnum_steps': vnum_steps,
-                  'tnum_steps': tnum_steps,
-                  'nparams':nparams,  
-                  'tnparams':tnparams,
-                  'server': server,
-                  'vary_penalty':myrnn.vary_penalty}
-                    
-    #np.save( savedir+data+'_'+model + '_'+ str(round(time.time()))  , dictionary) 
+            tr_logl = np.mean(tr_logl)
+            tst_logl = sess.run( rnn1_handles['accuracy'], tst_feed ) 
+            vld_logl = sess.run( rnn1_handles['accuracy'], vld_feed ) 
     
-    return dictionary, model, data, build_with_dropout, wform
+            print("Iteration = ", ep, 
+                  "Training Accuracy", np.mean(tr_logl),
+                  ",Test Accuracy = ", tst_logl, 
+                  ",Validation Accuracy = ", vld_logl, 
+                  ",Elapsed Time = ", t2-t1) 
 
-def model_driver(d):
-    'This function builds the computation graph for the specified model
-    The input is the dictionary d with fields:
-        model (model to be learnt), wform (form of the W matrices - full/diagonal/scalar/constant) 
-        K (number of states), L1 (input dimensions), L2 (output dimensions), numlayers (number of layers) '
-    # Reset graph
-    tf.reset_default_graph()
-    
-    rnn1 = rnn( model = d['model'], 
-                wform = d['wform'],
-                K = d['K'], 
-                L1 = d['L1'], 
-                L2 = d['L2'], 
-                numlayers = d['numlayers']) 
-    pdb.set_trace()
+            all_times.append(t2-t1)
+            tr_logls.append(tr_logl)
+            test_logls.append(tst_logl)
+            valid_logls.append(vld_logl)
 
-    
+        max_valid = np.max(np.array(valid_logls))
+        max_test = np.max( np.array(test_logls))
+        res_dictionary = {'valid':  np.array(valid_logls), 
+                      'max_valid':max_valid , 
+                      'tst':  np.array(test_logls), 
+                      'max_test':max_test, 
+                      'tr': np.array(tr_logls), 
+                      'all_times':all_times, 
+                      'tnparams':rnn1.tnparams}
+
+        d['wform'] = 'diagonal_to_full'
+        rnn2 = rnn( model_specs = d) 
+        rnn2_handles = rnn2.build_graph()  
 
 
-###################### Main Wrapper Function begins here ########################
+        res_dictionary.update(d)
+
+        return res_dictionary
 
 def main(dictionary):
 
@@ -216,10 +96,8 @@ def main(dictionary):
     dictionary.update(parameters) # add the necessary model parameters to the dictionary here
     
     ### next thing is determining the hyperparameters
-    performance_records = []
     np.random.seed( dictionary['seedin'][0] )
     tf.set_random_seed( dictionary['seedin'][1] ) 
-
     timestamp = str(round(time.time()))
 
     # lower and upper limits for hyper-parameters to be sampled
@@ -248,7 +126,7 @@ def main(dictionary):
         pdb.set_trace()
     ##################################################################    
 
-
+    records = [] #information will accumulate in this
     for i in range(dictionary['num_configs']):
         while True:  
             try:
@@ -260,21 +138,29 @@ def main(dictionary):
                 
                 dictionary.update({'LR':random_lr, 
                                     'K':random_K, 
-                                    'num_layers': random_num_layers} ) 
-                run_info = model_driver(dictionary) 
+                                    'num_layers': random_num_layers,
+                                    'min_params': min_params,
+                                    'max_params': max_params} ) 
+                run_info = model_driver(d = dictionary, data = data) 
                    
                 #append the performance records
-                performance_records.append(run_info)
+                records.append(run_info)
             
                 break
         
-            except ValueError:
+            except num_paramsError:
                 print('This parameter configuration is not valid!!!!!!!') 
 
         # Save in directory
         savedir = 'experiment_data/'
-        np.save( savedir + server+ '_data_' + data + '_model_' + model + '_'+ wform +'_dropout_'+str(build_with_dropout)+'_gpu_'+str(gpus[0])+ '_' + timestamp, performance_records)
-    return performance_records
+        np.save( savedir + dictionary['server'] 
+                + '_data_' + dictionary['data'] 
+                + '_model_' + dictionary['model'] 
+                + '_'+ dictionary['wform'] 
+                +'_gpu_'+ str(dictionary['gpus'][0]) 
+                + '_' + timestamp, records)
+    
+    return records
 
 def parameter_counter(model, wform, random_lr, random_K, random_num_layers, Trainseq, Validseq, Testseq, mbatchsize, gpus, task, data):
         #this function is to be used for getting a sense for parameter ranges
@@ -282,10 +168,7 @@ def parameter_counter(model, wform, random_lr, random_K, random_num_layers, Trai
         print('This model has ' + str(nparams) + ' parameters')
         return nparams
 
-################# Main Processing function begins here ################
-
 desktop = 1
-server = socket.gethostname() 
 if desktop:
     import matplotlib.pyplot as plt
     print('WARNING YOU ARE NOT DOING PARALLEL COMPUTATION!!!!!!!!!')
@@ -293,16 +176,17 @@ if desktop:
                 'task' : 'digits', 
                 'data' : 'mnist',
                 'model': 'bi_mod_lstm',
-                'wform':'full',
+                'wform':'diagonal',
                 'num_configs' : 60, 
-                'EP' : 151,
+                'EP' : 150,
                 'dropout' : [0.9, 0.9],
-                'gpus' : [1], 
-                'server': socket.gethostname}
+                'gpus' : [2], 
+                'server': socket.gethostname(),
+                'verbose':False }
     perfs = main(dictionary)
 
 else:
-
+    #this is all deprecated
     with multiprocessing.pool.Pool(5) as pool:
         mydict0 = {'seedin' : [1532,61245], 'task' : 'music', 'mode' : 'start', 'num_configs' : 60, 'gpus' : [0], 'model':model,'wform':'full' ,'server':server }
         mydict1 = {'seedin' : [855,8256], 'task' : 'music', 'mode' : 'start', 'num_configs' : 60, 'gpus' : [1], 'model':model, 'wform':'diagonal','server':server}
