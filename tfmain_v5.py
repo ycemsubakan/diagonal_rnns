@@ -21,54 +21,71 @@ def model_driver(d,data):
     # Reset graph
     tf.reset_default_graph()
     
-    rnn1 = rnn( model_specs = d) 
-    rnn1_handles = rnn1.build_graph()  
-   
-    # load the data
-    tr = SimpleDataIterator(data['Train'])
-    tst = SimpleDataIterator(data['Test'])
-    valid = SimpleDataIterator(data['Validation'])
 
-    config = tf.ConfigProto(log_device_placement = True)
-    config.gpu_options.allow_growth=True
-    config.allow_soft_placement=True
+    #build the first graph
+    if d['wform_global'] == 'diagonal_to_full':
+        d['wform'] = 'diagonal' # set the first rnn to be diagonal
+        rnn1 = rnn( model_specs = d) 
+        rnn1_handles = rnn1.build_graph()  
+       
+        config = tf.ConfigProto(log_device_placement = False)
+        config.gpu_options.allow_growth=True
+        config.allow_soft_placement=True
 
-    all_times, tr_logls, test_logls, valid_logls = [], [], [], [] 
-    with tf.Session(config = config) as sess:
+        sess = tf.Session(config = config) 
         sess.run(tf.initialize_all_variables())
-        for ep in range(d['EP']):
-            t1, tr_logl = time.time(), []
-            while tr.epochs == ep:
-                trb = tr.next_batch(n = d['batchsize'], task = d['task'], verbose = d['verbose'])      
-                feed = {rnn1_handles['x']:trb[0], rnn1_handles['y']:trb[1], rnn1_handles['seq_lens']:trb[2], rnn1_handles['dropout_kps']:d['dropout'] }         
-                tr_cost, tr_logl_temp, _ = sess.run( [rnn1_handles['cost'], rnn1_handles['accuracy'], rnn1_handles['train_step']], feed) 
-                tr_logl.append(tr_logl_temp)
 
-                if d['verbose']:
-                    print("Training cost = ", tr_cost, " Training Accuracy = ", tr_logl_temp)
-            t2 = time.time()
+        #train the first model 
+        all_times, tr_logls, test_logls, valid_logls = rnn1.optimizer(data = data, rnn_handles = rnn1_handles, sess = sess) 
 
-            #get training and test accuracies
-            tsb = tst.next_batch( n = tst.size, task = d['task'])  
-            vlb = valid.next_batch( n = valid.size, task = d['task'])  
+        vars_np = rnn1.save_modelvars_np(sess)
+        
+        print("Switching from diagonal to full") 
+        #build the second graph
+        d['wform'] = 'diagonal_to_full' # set the wform right for the 2nd rnn
+        with tf.variable_scope('rnn2'):
+            rnn2 = rnn( model_specs = d, initializer = vars_np)  
+            rnn2_handles = rnn2.build_graph()  
 
-            tst_feed = {rnn1_handles['x']: tsb[0], rnn1_handles['y']: tsb[1], rnn1_handles['seq_lens']: tsb[2], rnn1_handles['dropout_kps']:np.array([1,1])} 
-            vld_feed = {rnn1_handles['x']: vlb[0], rnn1_handles['y']: vlb[1], rnn1_handles['seq_lens']: vlb[2], rnn1_handles['dropout_kps']:np.array([1,1])} 
-   
-            tr_logl = np.mean(tr_logl)
-            tst_logl = sess.run( rnn1_handles['accuracy'], tst_feed ) 
-            vld_logl = sess.run( rnn1_handles['accuracy'], vld_feed ) 
-    
-            print("Iteration = ", ep, 
-                  "Training Accuracy", np.mean(tr_logl),
-                  ",Test Accuracy = ", tst_logl, 
-                  ",Validation Accuracy = ", vld_logl, 
-                  ",Elapsed Time = ", t2-t1) 
 
-            all_times.append(t2-t1)
-            tr_logls.append(tr_logl)
-            test_logls.append(tst_logl)
-            valid_logls.append(vld_logl)
+        #vars_to_init = [var for var in tf.all_variables() if 'Wfull' in var.name]  
+        
+        #before = sess.run(tf.trainable_variables()[1]) 
+        #sess.run(tf.variables_initializer(vars_to_init))
+
+        sess.run(tf.initialize_all_variables())
+        #after = sess.run(tf.trainable_variables()[1])
+        
+        #diff = np.sum( np.abs( before - after ) ) 
+        
+
+        all_times2, tr_logls2, test_logls2, valid_logls2 = rnn2.optimizer(data = data, rnn_handles = rnn2_handles, sess = sess, model_n = 2) 
+
+        all_times.extend(all_times2), tr_logls.extend(tr_logls2)
+        test_logls.extend(test_logls2), valid_logls.extend(valid_logls2)
+
+        max_valid = np.max(np.array(valid_logls))
+        max_test = np.max( np.array(test_logls))
+        res_dictionary = {'valid':  np.array(valid_logls), 
+                      'max_valid':max_valid , 
+                      'tst':  np.array(test_logls), 
+                      'max_test':max_test, 
+                      'tr': np.array(tr_logls), 
+                      'all_times':all_times, 
+                      'tnparams':rnn1.tnparams}
+    else:
+        rnn1 = rnn( model_specs = d) 
+        rnn1_handles = rnn1.build_graph()  
+       
+        config = tf.ConfigProto(log_device_placement = False)
+        config.gpu_options.allow_growth=True
+        config.allow_soft_placement=True
+
+        sess = tf.Session(config = config) 
+        sess.run(tf.initialize_all_variables())
+
+        #train the first model 
+        all_times, tr_logls, test_logls, valid_logls = rnn1.optimizer(data = data, rnn_handles = rnn1_handles, sess = sess) 
 
         max_valid = np.max(np.array(valid_logls))
         max_test = np.max( np.array(test_logls))
@@ -80,14 +97,9 @@ def model_driver(d,data):
                       'all_times':all_times, 
                       'tnparams':rnn1.tnparams}
 
-        d['wform'] = 'diagonal_to_full'
-        rnn2 = rnn( model_specs = d) 
-        rnn2_handles = rnn2.build_graph()  
+    res_dictionary.update(d)
 
-
-        res_dictionary.update(d)
-
-        return res_dictionary
+    return res_dictionary
 
 def main(dictionary):
 
@@ -176,9 +188,10 @@ if desktop:
                 'task' : 'digits', 
                 'data' : 'mnist',
                 'model': 'bi_mod_lstm',
-                'wform':'diagonal',
+                'wform': 'full',
+                'wform_global' : 'full',
                 'num_configs' : 60, 
-                'EP' : 150,
+                'EP' : 60,
                 'dropout' : [0.9, 0.9],
                 'gpus' : [2], 
                 'server': socket.gethostname(),

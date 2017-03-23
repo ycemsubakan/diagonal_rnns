@@ -56,7 +56,10 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
             W = tf.get_variable("W", shape = [self._num_units, self._num_units], initializer = self.init )   
             Wh = tf.matmul(state,W)   
         elif self.wform == 'diagonal':
-            W = tf.get_variable("W", shape = [self._num_units], initializer = self.init )   
+            with tf.variable_scope("Wdiag"):
+                W = tf.get_variable("W", 
+                        shape = [self._num_units], 
+                        initializer = self.init )   
             Wh = W*state
         elif self.wform == 'scalar':
             W = tf.get_variable("W", shape = [1], initializer = self.init ) 
@@ -64,13 +67,39 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
         elif self.wform == 'constant':    
             Wh = state
         elif self.wform == 'diagonal_to_full':
-            tf.get_variable_scope().reuse_variable()
-            Wdiag = tf.get_variable("W", shape = [self._num_units]) 
-            W = tf.Variable( tf.diag(Wdiag), name = "Wfull") 
+            #get the current variable scope
+            var_scope = tf.get_variable_scope().name.replace('rnn2/','')
 
-        U_shape = [x.get_shape().as_list()[1], self._num_units] 
-        U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
-        b = tf.get_variable("b", shape = [self._num_units], initializer = self.init)
+            #first filtering 
+            vars_to_use = [var for var in self.init if var_scope in var[0]]  
+
+            #next, assign the variables   
+            for var in vars_to_use:
+                if '/W' in var[0]:
+                    Wfull = np.diag(var[1])
+                    init = tf.constant_initializer(Wfull)
+
+                    W = tf.get_variable("Wfull",
+                        shape = [self._num_units,self._num_units], 
+                        initializer = init) 
+                elif '/U' in var[0]:
+                    init = tf.constant_initializer(var[1])
+
+                    U_shape = [x.get_shape().as_list()[1], self._num_units] 
+                    U = tf.get_variable("U", shape = U_shape, initializer = init) 
+                elif '/b' in var[0]:
+                    init = tf.constant_initializer(var[1])
+            
+                    b = tf.get_variable("b", 
+                            shape = [self._num_units], initializer = init)
+        
+            #finally compute Wh
+            Wh = tf.matmul(state,W) 
+
+        if self.wform != 'diagonal_to_full':
+            U_shape = [x.get_shape().as_list()[1], self._num_units] 
+            U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
+            b = tf.get_variable("b", shape = [self._num_units], initializer = self.init)
         
         Ux = tf.matmul( x, U)  
         next_state = Wh + Ux + b
@@ -190,13 +219,14 @@ class GatedWCell(tf.contrib.rnn.RNNCell):
 
 # Start class definition
 class rnn(object):
-    def __init__(self, model_specs):
+    def __init__(self, model_specs, initializer = 'random'):
         'model specs is a dictionary'
         self.model_specs = model_specs
+        self.initializer = initializer
     
     def build_graph(self ): 
         'this function builds a graph with the specifications in self.model_specs'
-
+        
         d = self.model_specs #unpack the model specifications
         with tf.device('/gpu:' + str(d['gpus'][0])):
             if d['mapping_mode'] == 'seq2seq':
@@ -213,6 +243,7 @@ class rnn(object):
             #compute the number of parameters to be trained
             tvars = tf.trainable_variables()
             tnparams = np.sum([np.prod(var.get_shape().as_list()) for var in tvars])
+            saver = tf.train.Saver(tvars) 
            
             #raise an error if we are outside the allowed range
             if d['min_params'] > tnparams or d['max_params'] < tnparams:
@@ -220,7 +251,6 @@ class rnn(object):
             else:
                 self.tnparams = tnparams
                 self.tvars_names = [var.name for var in tvars] 
-                pdb.set_trace()
 
             #define the cost         
             if d['outstage'] == 'softmax':
@@ -230,7 +260,9 @@ class rnn(object):
                 cost = tf.nn.sigmoid_cross_entropy_with_logits(logits = yhat, labels = y) 
             
             #define the optimizer
+            #with tf.variable_scope(self.model_specs['wform'], reuse = False):
             train_step = tf.train.AdamOptimizer(d['LR']).minimize(cost)
+            
             #compute the accuracies
             preds = tf.nn.softmax(yhat) 
             correct = tf.equal(tf.cast(tf.argmax(preds,1),tf.int32), y)
@@ -243,7 +275,9 @@ class rnn(object):
                          'cost':cost,
                          'dropout_kps':dropout_kps,
                          'seq_lens':seq_lens,
-                         'accuracy':accuracy}
+                         'accuracy':accuracy,
+                         'saver':saver}
+                                       
                          
 
         return graph_handles
@@ -260,7 +294,11 @@ class rnn(object):
         wform, model, K, num_layers, mapping_mode, L1, L2 = d['wform'], d['model'], d['K'], d['num_layers'], d['mapping_mode'], d['L1'], d['L2']
 
         if model in bidir_models:
-            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
+            #bidirectional rnns
+            if self.initializer == 'random':
+                initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
+            else:
+                initializer = self.initializer
             
             if model == 'bi_lstm': 
                 fw_cell = tf.contrib.rnn.BasicLSTMCell(K, forget_bias=1.0)
@@ -296,13 +334,25 @@ class rnn(object):
                 outputs = tf.unstack(outputs,axis = 2)
                 outputs = tf.concat(outputs, axis = 1)
 
-            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
             with tf.variable_scope("output_stage"):
                 if self.model_specs['wform'] == 'diagonal_to_full':
-                    tf.get_variable_scopei().reuse_variables()
+                    vars_to_use = [var for var in self.initializer if 'output_stage' in var[0]] 
+                    for var in vars_to_use:
+                        if '/V' in var[0]:
+                            initializer = tf.constant_initializer(var[1])
+                            V = tf.get_variable("V", dtype= tf.float32, 
+                                shape = [2*K, L2], initializer = initializer)  
+                        else:
+                            initializer = tf.constant_initializer(var[1])
+                            b = tf.get_variable("b", dtype= tf.float32, 
+                                shape = [L2], initializer = initializer)  
 
-                V = tf.get_variable("V", dtype= tf.float32, shape = [2*K, L2], initializer = initializer)  
-                b = tf.get_variable("b", dtype= tf.float32, shape = [L2 ], initializer = initializer)  
+                else:
+                    initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
+                    V = tf.get_variable("V", dtype= tf.float32, 
+                            shape = [2*K, L2], initializer = initializer)  
+                    b = tf.get_variable("b", dtype= tf.float32, 
+                            shape = [L2 ], initializer = initializer)  
 
             yhat = tf.matmul(outputs,V) + tf.reshape(b, (1, L2))
             return yhat 
@@ -440,230 +490,64 @@ class rnn(object):
             #y_hat = fliplr( tf.transpose(tf.reshape( y, [Uxth,Uxtw])))
             return Yhat
             
+
+    def optimizer(self, data, rnn_handles, sess, model_n = 1):
+       
+        #if model_n == 2:
+        #    rnn_handles['saver'].restore(sess,'first_model.index') 
+
+        tr = SimpleDataIterator(data['Train'])
+        tst = SimpleDataIterator(data['Test'])
+        valid = SimpleDataIterator(data['Validation'])
+
+        d = self.model_specs # unpack the variables 
+
+        all_times, tr_logls, test_logls, valid_logls = [], [], [], [] 
+        for ep in range(d['EP']):
+            t1, tr_logl = time.time(), []
+            while tr.epochs == ep:
+                trb = tr.next_batch(n = d['batchsize'], task = d['task'], verbose = d['verbose'])      
+                feed = {rnn_handles['x']:trb[0], rnn_handles['y']:trb[1], rnn_handles['seq_lens']:trb[2], rnn_handles['dropout_kps']:d['dropout'] }         
+                tr_cost, tr_logl_temp, _ = sess.run( [rnn_handles['cost'], rnn_handles['accuracy'], rnn_handles['train_step']], feed) 
+                tr_logl.append(tr_logl_temp)
+
+                if d['verbose']:
+                    print("Training cost = ", tr_cost, " Training Accuracy = ", tr_logl_temp)
+            t2 = time.time()
+
+            #get training and test accuracies
+            tsb = tst.next_batch( n = tst.size, task = d['task'])  
+            vlb = valid.next_batch( n = valid.size, task = d['task'])  
+
+            tst_feed = {rnn_handles['x']: tsb[0], rnn_handles['y']: tsb[1], rnn_handles['seq_lens']: tsb[2], rnn_handles['dropout_kps']:np.array([1,1])} 
+            vld_feed = {rnn_handles['x']: vlb[0], rnn_handles['y']: vlb[1], rnn_handles['seq_lens']: vlb[2], rnn_handles['dropout_kps']:np.array([1,1])} 
+   
+            tr_logl = np.mean(tr_logl)
+            tst_logl = sess.run( rnn_handles['accuracy'], tst_feed ) 
+            vld_logl = sess.run( rnn_handles['accuracy'], vld_feed ) 
     
-    def multi_gpu_grad(self, g1 = tf.tanh, g2 = tf.sigmoid, opt = 'Adam', learning_rate = 0.01, case = 'scalar_w', use_gpu = True, count_mode = False):
-        # Placeholders for input and output
-#         self.x = tf.placeholder(tf.float64, [L,None], name = 'in_placeholder')
-#         self.y = tf.placeholder(tf.float64, [L,None], name = 'out_placeholder')
-        self.g1 = g1
-        self.g2 = g2
-        
-        # Define optimizer
-        if opt == 'RMSProp':
-            print('Using RMSProp Optimizer')
-            optimizer = tf.train.RMSPropOptimizer( learning_rate, .5, .9)
-        else:
-            print('Using Adam Optimizer')
-            optimizer = tf.train.AdamOptimizer(learning_rate)
-            
-        # Split the input data to one batch per GPU
-        self.ins = tf.split( self.x, len(self.gpus), axis = 1) # self.ins = tf.split( self.x, len(gpus), 1)
-        self.out = tf.split( self.y, len(self.gpus), axis = 1) # self.out = tf.split( self.y, len(gpus), 1)
+            print("Iteration = ", ep, 
+                  "Training Accuracy", np.mean(tr_logl),
+                  ",Test Accuracy = ", tst_logl, 
+                  ",Validation Accuracy = ", vld_logl, 
+                  ",Elapsed Time = ", t2-t1) 
 
-        # Cost and gradient from each tower
-        device = '/gpu:' if use_gpu else '/cpu:' 
-        grads = []
-        cost = 0
-        for i in range(len(self.gpus)):
-            with tf.device(device + str( self.gpus[i])):
-                if i > 0:
-                    tf.get_variable_scope().reuse_variables()
+            all_times.append(t2-t1)
+            tr_logls.append(tr_logl)
+            test_logls.append(tst_logl)
+            valid_logls.append(vld_logl)
 
-                c = self.cost_function( self.out[i], self.model( self.ins[i], case))
-                if not(count_mode):
-                    grads.append( optimizer.compute_gradients( c))
-                cost += c
-                
-        # Average the gradients for all towers
-        if not(count_mode):
-            avgrad = []
-            for gv in zip( *grads):
-                gg = []
-                for g,_ in gv:
-                    gg.append( tf.expand_dims( g, 0))
-                gr = tf.reduce_sum( tf.concat( values = gg, axis = 0), 0)
-                avgrad.append( (gr, gv[0][1]))
+        #if model_n == 1: 
+        #    rnn_handles['saver'].save(sess, 'first_model') 
 
-            # Return the weight update and cost ops
-            self.updates = [optimizer.apply_gradients( avgrad),cost] 
-        
+        return all_times, tr_logls, test_logls, valid_logls
 
-    def sgd_train(self, X, Y, sess, ep = 200, batchsize = 50, verbose = True, plot = False, Validseq = None, Testseq = None, task = 'text', Tgen = 1000):
-        batchsize = int(batchsize)
-        batches = np.arange(0, X.shape[1], round(batchsize )) #this defines the batch start points 
-        batch_ends = (batches + batchsize) <= (X.shape[1]) 
-        nbatches = np.sum(batch_ends)
-        if task == 'music':
-            validlens = [Validseq[i].shape[1] for i in range(len(Validseq))]
-            testlens = [Testseq[i].shape[1] for i in range(len(Testseq))]
-            totallen_valid = np.sum(validlens) 
-            totallen_test = np.sum(testlens) 
-            period = 100 #period in which we get validation values
-        elif task == 'text':
-            period = 2 
-        else:
-            period = 10
+    def save_modelvars_np(self, sess):
 
-        eps = 1e-9
-        cst = []
-        test_logls = [] 
-        valid_logls = []
-        all_times = []
-        for jj in range(ep):
-            if jj < 41:
-                pen = 10000
-            else:
-                pen = 0 
+        variables = tf.trainable_variables()
+        vars_np = [(var.name,sess.run(var)) for var in variables]
 
-            c_sum = 0
-            start_time = time.time()
-            for ii in range(nbatches):
-                Xb = X[:,batches[ii]:batches[ii]+batchsize]
-                if task == 'digits':
-                    Yb = Y[:,int((batches[ii]/28)):int((batches[ii]+batchsize)/28)]
-                else:
-                    Yb = Y[:,batches[ii]:batches[ii]+batchsize]
-
-                d = {self.x: Xb, self.y: Yb, self.lam: pen}
-                c = sess.run( self.updates, feed_dict=d)
-                c_sum += c[1]
-            cst.append(c_sum)
-            time_elapsed = time.time() - start_time
-            all_times.append(time_elapsed) 
-
-            if jj%1==0 or jj==(ep-1):
-                if (verbose):
-                    if self.vary_penalty: #if we have the off-diagonal penalty
-                        penalty = sess.run(self.penalty, feed_dict = {self.lam: pen })
-                        print('Penalty = ' + str(penalty) )
-                        c_sum = c_sum - nbatches*penalty 
-
-                    print( 'Iteration: ' + str(jj) + ' Cost = ' + str( c_sum/nbatches )+ ' Elapsed Time = ' +str(time_elapsed) + '_gpu_' + str(self.gpus[0]))
-                    
-                    if (jj%period == 0) | (jj==(ep-1)):
-                       
-                        if task == 'music':
-                            # t1 = time.time()
-                            # test_logl = 0
-                            # for nn in range(len(Testseq)):
-                            #     xtest = tf.placeholder(tf.float32, [self.L, Testseq[nn].shape[1]-1], name = 'xtest')
-                            #     with tf.device('/gpu:' + str(self.gpus[0])):
-                            #         ytest,_ = self.model( xtest, case = self.case, train_mode = False, finalvalid_mode = True, custom_numsteps = Testseq[nn].shape[1] - 1)
-
-                            #     y_probs = sess.run(ytest, feed_dict = {xtest:Testseq[nn][:,0:-1] })
-                            #     temp_logl = np.sum(Testseq[nn][:,1:]*np.log(y_probs+eps) + (1-Testseq[nn][:,1:])*np.log(1-y_probs+eps)) 
-                            #     test_logl = test_logl + temp_logl
-                            # test_logl = test_logl/totallen_test 
-                            # test_logls.append(test_logl)  
-                            # t2 = time.time()
-                            # print( 'Test likelihood = ' + str(test_logl) + ' Time Elapsed = ' + str(t2-t1) + ' secs' ) 
-                           
-                            ########test###################
-                            t1 = time.time()
-                            tnumsteps = 1000 
-                            Testseqconcat = np.concatenate( Testseq,axis = 1)
-                            tslen = Testseqconcat.shape[1] - Testseqconcat.shape[1]%tnumsteps
-                            xtest = tf.placeholder(tf.float32, [self.L, tslen], name = 'xtest')
-                            Testseqconcat = Testseqconcat[:,0:tslen + 1]
-                            with tf.device('/gpu:' + str(self.gpus[0])):
-                                ytest,_ = self.model( xtest, case = self.case, train_mode = False, finalvalid_mode = True, custom_numsteps = tnumsteps)
-
-                            y_probs = sess.run(ytest, feed_dict = {xtest:Testseqconcat[:,0:tslen] })
-                            test_logl = np.sum(Testseqconcat[:,1:]*np.log(y_probs+eps) + (1-Testseqconcat[:,1:])*np.log(1-y_probs+eps))/tslen
-                            test_logls.append(test_logl)    
-                            t2 = time.time()
-                            print( 'Test likelihood parallel method = ' + str(test_logl) + ' Time Elapsed = ' + str(t2 - t1) + ' secs' ) 
-
-                            ########validation##############
-                            t1 = time.time()
-                            vnumsteps = 1000 
-                            Validseqconcat = np.concatenate( Validseq,axis = 1)
-                            vlen = Validseqconcat.shape[1] - Validseqconcat.shape[1]%vnumsteps
-                            xvalid = tf.placeholder(tf.float32, [self.L, vlen], name = 'xtest')
-                            Validseqconcat = Validseqconcat[:,0:vlen + 1]
-                            with tf.device('/gpu:' + str(self.gpus[0])):
-                                yvalid,_ = self.model( xvalid, case = self.case, train_mode = False, finalvalid_mode = True, custom_numsteps = vnumsteps)
-
-                            y_probs = sess.run(yvalid, feed_dict = {xvalid:Validseqconcat[:,0:vlen] })
-                            valid_logl = np.sum(Validseqconcat[:,1:]*np.log(y_probs+eps) + (1-Validseqconcat[:,1:])*np.log(1-y_probs+eps))/vlen
-                            valid_logls.append(valid_logl)    
-                            t2 = time.time()
-                            print( 'Validation likelihood parallel method = ' + str(valid_logl) + ' Time Elapsed = ' + str(t2 - t1) + ' secs' ) 
-
-
-                        elif task == 'text': 
-                            reportmode = 2 
-
-                            if reportmode == 1:
-                                _, test_logl = self.tfgenerate_text(sess, Tseq = Tgen, x = Testseq[:, 0:Tgen+1])
-                                test_logls.append(test_logl)  
-                                print(  'Test log2BPC = ' + str(test_logl) ) 
-
-
-                                _, valid_logl = self.tfgenerate_text(sess, Tseq = Tgen, x = Validseq[:, 0:Tgen+1])
-                                valid_logls.append(valid_logl)  
-                                print(  'Valid log2BPC = ' + str(valid_logl) ) 
-                            elif reportmode == 2:  
-                                ##TEST##
-                                testlen = Testseq.shape[1]
-                                feed_dict = { self.final_xtest: Testseq[:,0:-1] }
-                                y_probs = sess.run(self.final_ytest, feed_dict ) 
-                                test_bpc = np.sum(  Testseq[:,1:]*np.log2(y_probs + eps)  )/testlen
-                                test_logls.append(test_bpc)  
-                                print( 'Test log2BPC = ' + str(test_bpc) + 'gpu:'+ str(self.gpus[0]) )
-                                
-                                ##VALIDATION##
-                                validlen = Validseq.shape[1]
-                                feed_dict = { self.final_xvalid: Validseq[:,0:-1] }
-                                y_probs = sess.run(self.final_yvalid, feed_dict ) 
-                                valid_bpc = np.sum(  Validseq[:,1:]*np.log2(y_probs + eps)  )/validlen
-                                valid_logls.append(valid_bpc)
-                                print( 'Valid log2BPC = ' + str(valid_bpc)+ 'gpu:'+ str(self.gpus[0]) )
-
-                        elif task in ['digits','speech']:
-                                feed_dict = {self.xtest : Testseq[0]}
-                                y_probs = sess.run(self.ytest, feed_dict = feed_dict)     
-                                true_classes = np.argmax(Testseq[1], axis = 0)
-                                est_classes = np.argmax(y_probs, axis = 0) 
-                                test_accuracy = np.mean(true_classes == est_classes)
-                                test_logls.append( test_accuracy ) 
-
-                                feed_dict = {self.xvalid: Validseq[0]} 
-                                y_probs = sess.run(self.yvalid, feed_dict = feed_dict) 
-                                true_classes = np.argmax(Validseq[1], axis = 0)
-                                est_classes = np.argmax(y_probs, axis = 0)
-                                valid_accuracy = np.mean(true_classes == est_classes)
-                                valid_logls.append( valid_accuracy ) 
-
-
-                                print('Test Accuracy = ' + str(test_accuracy) + ' Validation Accuracy = ' + str(valid_accuracy) ) 
-
-
-                else:
-                    plt.subplot( 2, 1, 1)
-                    pl(cst)
-
-        #final validation/test for text
-        if task == 'text':
-            ##TEST##
-            testlen = Testseq.shape[1]
-            feed_dict = { self.final_xtest: Testseq[:,0:-1] }
-            y_probs = sess.run(self.final_longytest, feed_dict ) 
-            final_test_bpc = np.sum( Testseq[:,1:]*np.log2(y_probs + eps)  )/testlen
-            test_logls.append(final_test_bpc)  
-            print( 'Final Test log2BPC = ' + str(final_test_bpc) )
-            
-            ##VALIDATION##
-            validlen = Validseq.shape[1]
-            feed_dict = { self.final_xvalid: Validseq[:,0:-1] }
-            y_probs = sess.run(self.final_longyvalid, feed_dict ) 
-            final_valid_bpc = np.sum( Validseq[:,1:]*np.log2(y_probs + eps)  )/validlen
-            valid_logls.append(final_valid_bpc)
-            print( 'Final Valid log2BPC = ' + str(final_valid_bpc))
-                                    
-
-
-        return valid_logls,test_logls,cst,all_times   
+        return vars_np 
 
     def tfgenerate_text(self, sess, Tseq = 100, x = None): 
         L = self.L
@@ -891,12 +775,15 @@ def return_Klimits(model, wform, data):
             K_min = 312; K_max = 629
 
     elif data == 'mnist':
-        min_params = 1e5; max_params = 1e6 
+        min_params = 1e1; max_params = 15e6 
 
         if (model == 'bi_mod_lstm') & (wform == 'diagonal'):
-            K_min = 50; K_max = 350
+            K_min = 40; K_max = 250
         elif (model in ['bi_mod_lstm','bi_lstm']) & (wform == 'full'):    
-            K_min = 40; K_max = 200
+            K_min = 40; K_max = 250
+        elif (model == 'bi_mod_lstm') & (wform == 'diagonal_to_full'):
+            K_min = 40; K_max = 250
+
         
         elif (model == 'bi_gated_w') & (wform == 'diagonal'):
             K_min = 50; K_max = 500
