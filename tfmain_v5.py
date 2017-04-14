@@ -4,12 +4,10 @@ import tensorflow as tf
 import time
 import pdb 
 import os 
-import itertools
 import socket
 import multiprocessing
 from multiprocessing import Process
 from multiprocessing.pool import Pool
-import _pickle as cPickle
 from tfrnns_v5 import *
 
 def model_driver(d,data):
@@ -21,13 +19,13 @@ def model_driver(d,data):
     # Reset graph
     tf.reset_default_graph()
     
-
     #build the first graph
-    if d['wform_global'] == 'diagonal_to_full':
+    if d['wform_global'] == 'diag_to_full':
         d['wform'] = 'diagonal' # set the first rnn to be diagonal
         rnn1 = rnn( model_specs = d) 
         rnn1_handles = rnn1.build_graph()  
-       
+        print('This model has ',rnn1.tnparams, ' parameters')
+        
         config = tf.ConfigProto(log_device_placement = False)
         config.gpu_options.allow_growth=True
         config.allow_soft_placement=True
@@ -39,13 +37,16 @@ def model_driver(d,data):
         all_times, tr_logls, test_logls, valid_logls = rnn1.optimizer(data = data, rnn_handles = rnn1_handles, sess = sess) 
 
         vars_np = rnn1.save_modelvars_np(sess)
-        
+       
+
         print("Switching from diagonal to full") 
         #build the second graph
-        d['wform'] = 'diagonal_to_full' # set the wform right for the 2nd rnn
+        d['wform'] = 'diag_to_full' # set the wform right for the 2nd rnn
         with tf.variable_scope('rnn2'):
             rnn2 = rnn( model_specs = d, initializer = vars_np)  
-            rnn2_handles = rnn2.build_graph()  
+            rnn2_handles = rnn2.build_graph() 
+        print('The first model had ',rnn1.tnparams,
+              ' ,the second model has ',rnn2.tnparams,' parameters') 
 
 
         #vars_to_init = [var for var in tf.all_variables() if 'Wfull' in var.name]  
@@ -57,7 +58,6 @@ def model_driver(d,data):
         #after = sess.run(tf.trainable_variables()[1])
         
         #diff = np.sum( np.abs( before - after ) ) 
-        
 
         all_times2, tr_logls2, test_logls2, valid_logls2 = rnn2.optimizer(data = data, rnn_handles = rnn2_handles, sess = sess, model_n = 2) 
 
@@ -74,20 +74,21 @@ def model_driver(d,data):
                       'all_times':all_times, 
                       'tnparams':rnn1.tnparams}
     else:
-        rnn1 = rnn( model_specs = d) 
+        rnn1 = rnn( model_specs = d, initializer = d['init']) 
         rnn1_handles = rnn1.build_graph()  
        
         config = tf.ConfigProto(log_device_placement = False)
         config.gpu_options.allow_growth=True
         config.allow_soft_placement=True
 
-        sess = tf.Session(config = config) 
-        sess.run(tf.initialize_all_variables())
+        with tf.Session(config = config) as sess:
+            sess.run(tf.initialize_all_variables())
 
-        #train the first model 
-        all_times, tr_logls, test_logls, valid_logls = rnn1.optimizer(data = data, rnn_handles = rnn1_handles, sess = sess) 
+            #train the first model 
+            all_times, tr_logls, test_logls, valid_logls = rnn1.optimizer(data = data, rnn_handles = rnn1_handles, sess = sess) 
 
-        max_valid = np.max(np.array(valid_logls))
+            
+        max_valid = np.max(np.array(valid_logls)) #kind of unnecessary
         max_test = np.max( np.array(test_logls))
         res_dictionary = {'valid':  np.array(valid_logls), 
                       'max_valid':max_valid , 
@@ -104,7 +105,7 @@ def model_driver(d,data):
 def main(dictionary):
 
     # first get the data and the resulting model parameters  
-    data, parameters = load_data(task = dictionary['task'], data = dictionary['data'])
+    data, parameters = load_data(task = dictionary['task'], data = dictionary['data'] )
     dictionary.update(parameters) # add the necessary model parameters to the dictionary here
     
     ### next thing is determining the hyperparameters
@@ -113,51 +114,49 @@ def main(dictionary):
     timestamp = str(round(time.time()))
 
     # lower and upper limits for hyper-parameters to be sampled
-    lr_min ,lr_max = -4, -2 
-    num_layers_min, num_layers_max = 1, 3
+    lr_min ,lr_max = dictionary['lr_min'], dictionary['lr_max']
+    num_layers_min, num_layers_max = dictionary['num_layers_min'], dictionary['num_layers_max']
     K_min, K_max, min_params, max_params = return_Klimits(
             model = dictionary['model'], 
             wform = dictionary['wform'], 
             data = dictionary['data']) 
 
-    countmode = False
-
-    ##################This part is just for counting##################
-    ### deprecated  - update this 
-    if countmode:
-        n1 = parameter_counter(model, wform, lr_min, K_min, num_layers_max)  
-        pdb.set_trace()
-        n2 = parameter_counter(model, wform, lr_min, K_max, num_layers_min) 
-        print('For this model (' +model + wform+ 
-                ') number of parameters Lower limit is ' + str(n1) + 
-                ' upper limit is ' + str(n2) + 
-                '\n|||||||| by the way'+ ' min_params= ' + str(min_params) +
-                ' max_params= ' + str(max_params) +  
-                ' for this dataset which is ' + data 
-                + '|||||\n  The code will run on gpu' + str(gpus) ) 
-        pdb.set_trace()
-    ##################################################################    
-
     records = [] #information will accumulate in this
     for i in range(dictionary['num_configs']):
         while True:  
             try:
-                random_lr, random_K, random_num_layers = generate_random_hyperparams(
+                lr, K, num_layers, momentum = generate_random_hyperparams(
                         lr_min =  lr_min, lr_max = lr_max, 
                         K_min = K_min, K_max = K_max , 
                         num_layers_min = num_layers_min, 
-                        num_layers_max = num_layers_max)
+                        num_layers_max = num_layers_max,
+                        load_hparams = (dictionary['load_hparams'],i))
                 
-                dictionary.update({'LR':random_lr, 
-                                    'K':random_K, 
-                                    'num_layers': random_num_layers,
-                                    'min_params': min_params,
-                                    'max_params': max_params} ) 
-                run_info = model_driver(d = dictionary, data = data) 
-                   
-                #append the performance records
-                records.append(run_info)
-            
+                print("Configuration ",i,
+                      "K = ",K, 
+                      "num_layers = ", num_layers,
+                      "Learning Rate = ", lr,
+                      "Momentum = ", momentum)  
+                #this if clause enables the user to restart an experiment from a specific point the experiment
+                if i < dictionary['start']:
+                    break
+                
+                try: # Sometimes resources may get exhausted, this exception handles that 
+                    dictionary.update({'LR': lr, 
+                                        'K': K, 
+                                        'num_layers': num_layers,
+                                        'min_params': min_params,
+                                        'max_params': max_params,
+                                        'momentum' : momentum} ) 
+                    run_info = model_driver(d = dictionary, data = data) 
+                       
+                    #append the performance records
+                    records.append(run_info)
+                except KeyboardInterrupt:
+                    raise 
+                except:
+                    print('Resouces exhausted for this configuration, moving on')
+                    #raise
                 break
         
             except num_paramsError:
@@ -168,52 +167,36 @@ def main(dictionary):
         np.save( savedir + dictionary['server'] 
                 + '_data_' + dictionary['data'] 
                 + '_model_' + dictionary['model'] 
-                + '_'+ dictionary['wform'] 
-                +'_gpu_'+ str(dictionary['gpus'][0]) 
+                + '_'+ dictionary['wform_global'] 
+                + '_optimizer_' + dictionary['optimizer']
+                +'_device_'+ dictionary['device']
                 + '_' + timestamp, records)
     
     return records
 
-def parameter_counter(model, wform, random_lr, random_K, random_num_layers, Trainseq, Validseq, Testseq, mbatchsize, gpus, task, data):
-        #this function is to be used for getting a sense for parameter ranges
-        nparams = run_model_v2(random_lr, random_K, random_num_layers, Trainseq, Validseq, Testseq, batchsize, gpu, task, data, min_params = 4e5, max_params = 6e5, count_mode = True, model = model, wform = wform)
-        print('This model has ' + str(nparams) + ' parameters')
-        return nparams
 
-desktop = 1
-if desktop:
-    import matplotlib.pyplot as plt
-    print('WARNING YOU ARE NOT DOING PARALLEL COMPUTATION!!!!!!!!!')
-    dictionary = {'seedin' : [1144, 1521], 
-                'task' : 'digits', 
-                'data' : 'mnist',
-                'model': 'bi_mod_lstm',
-                'wform': 'full',
-                'wform_global' : 'full',
-                'num_configs' : 60, 
-                'EP' : 60,
-                'dropout' : [0.9, 0.9],
-                'gpus' : [2], 
-                'server': socket.gethostname(),
-                'verbose':False }
-    perfs = main(dictionary)
+#import matplotlib.pyplot as plt
+print('Warning: This script is not going to parallelized among gpus.')
+wform = 'diagonal'
+dictionary = {'seedin' : [1144, 1521], 
+            'task' : 'music', 
+            'data' : 'Nottingham',
+            'model': 'mod_rnn',
+            'wform': wform,
+            'wform_global' : wform,
+            'num_configs' : 60, 
+            'start' : 0,  
+            'EP' : 300,
+            'dropout' : [0.9, 0.9],
+            'device' : 'gpu:1', 
+            'server': socket.gethostname(),
+            'verbose': False,
+            'load_hparams': False, #this loads hyper-parameters from a results file
+            'count_mode': False, #if this is True, the code will stop after printing the number of trainable parameters
+            'init':'xavier',
+            'lr_min':-4, 'lr_max':-2,
+            'num_layers_min':2, 'num_layers_max':3,
+            'optimizer':'RMSProp',
+            'notes':'I am trying RMS prop here. I am sampling momentums uniformly in this one. (This is what differs in this experiment from other RMSprop experiments) The upper limit for number of parameters is open. I am doing the gradient centralization thing also '}
 
-else:
-    #this is all deprecated
-    with multiprocessing.pool.Pool(5) as pool:
-        mydict0 = {'seedin' : [1532,61245], 'task' : 'music', 'mode' : 'start', 'num_configs' : 60, 'gpus' : [0], 'model':model,'wform':'full' ,'server':server }
-        mydict1 = {'seedin' : [855,8256], 'task' : 'music', 'mode' : 'start', 'num_configs' : 60, 'gpus' : [1], 'model':model, 'wform':'diagonal','server':server}
-        #mydict2 = {'seedin' : [8125,539], 'task' : 'music', 'mode' : 'start', 'num_configs' : 30, 'gpus' : [2]}
-        #mydict3 = {'seedin' : [215,41236], 'task' : 'music', 'mode' : 'start', 'num_configs' : 30, 'gpus' : [3]}
-
-
-
-        perf0 = pool.apply_async(mainwrapper, args = [mydict0])
-        perf1 = pool.apply_async(mainwrapper, args = [mydict1])
-        #perf2 = pool.apply_async(mainwrapper, args = [mydict2])
-        #perf3 = pool.apply_async(mainwrapper, args = [mydict3])
-
-        p0 = perf0.get()
-        p1 = perf1.get()
-        #p2 = perf2.get()
-        #p3 = perf3.get()
+perfs = main(dictionary)
