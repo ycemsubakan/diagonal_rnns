@@ -8,7 +8,7 @@ import socket
 import multiprocessing
 from multiprocessing import Process
 from multiprocessing.pool import Pool
-from tfrnns_v5 import *
+from rnns import *
 
 def model_driver(d,data):
     """This function builds the computation graph for the specified model
@@ -49,16 +49,8 @@ def model_driver(d,data):
               ' ,the second model has ',rnn2.tnparams,' parameters') 
 
 
-        #vars_to_init = [var for var in tf.all_variables() if 'Wfull' in var.name]  
+        sess.run(tf.initialize_all_variables()) #initializes the first model
         
-        #before = sess.run(tf.trainable_variables()[1]) 
-        #sess.run(tf.variables_initializer(vars_to_init))
-
-        sess.run(tf.initialize_all_variables())
-        #after = sess.run(tf.trainable_variables()[1])
-        
-        #diff = np.sum( np.abs( before - after ) ) 
-
         all_times2, tr_logls2, test_logls2, valid_logls2 = rnn2.optimizer(data = data, rnn_handles = rnn2_handles, sess = sess, model_n = 2) 
 
         all_times.extend(all_times2), tr_logls.extend(tr_logls2)
@@ -176,9 +168,8 @@ def main(dictionary):
 
 
 #import matplotlib.pyplot as plt
-print('Warning: This script is not going to parallelized among gpus.')
 wform = 'diagonal'
-dictionary = {'seedin' : [1144, 1521], 
+input_dictionary = {'seedin' : [1144, 1521], 
             'task' : 'music', 
             'data' : 'Nottingham',
             'model': 'mod_rnn',
@@ -199,4 +190,4 @@ dictionary = {'seedin' : [1144, 1521],
             'optimizer':'RMSProp',
             'notes':'I am trying RMS prop here. I am sampling momentums uniformly in this one. (This is what differs in this experiment from other RMSprop experiments) The upper limit for number of parameters is open. I am doing the gradient centralization thing also '}
 
-perfs = main(dictionary)
+perfs = main(input_dictionary)

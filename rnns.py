@@ -1,3 +1,4 @@
+# This file has the rnn functions and classes  
 import numpy as np
 import tensorflow as tf
 import pdb
@@ -7,7 +8,7 @@ import _pickle as pickle
 import itertools
 import sys
 import os
-#import matplotlib.pyplot as plt
+
 
 class ModRNNCell(tf.contrib.rnn.RNNCell):
     """Vanilla RNN Cell"""
@@ -81,33 +82,14 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
             self.L1 = inputs.get_shape().as_list()[1]
            
             mats, biases = self.get_params_parallel()
-            #with tf.variable_scope("i"):  
-            #    Wi, Ui, bi = self.get_params()
-            #with tf.variable_scope("j"):  
-            #    Wj, Uj, bj = self.get_params()
-            #with tf.variable_scope("f"):  
-            #    Wf, Uf, bf = self.get_params()
-            #with tf.variable_scope("o"):  
-            #    Wo, Uo, bo = self.get_params()
-
             if self.wform == 'full' or self.wform == 'diag_to_full':
-                #WiUi,WjUj = tf.concat([Wi,Ui], axis=0), tf.concat([Wj,Uj],axis=0)
-                #WfUf,WoUo = tf.concat([Wf,Uf], axis=0), tf.concat([Wo,Uo],axis=0)
-                #mats = tf.concat([WiUi,WjUj,WfUf,WoUo],axis=1)
-                #biases = tf.concat([bi,bj,bf,bo],axis=0) 
-
+                
                 res = tf.matmul(tf.concat([h,inputs],axis=1),mats)
                 res_wbiases = tf.nn.bias_add(res, biases)
            
                 i,j,f,o = tf.split(res_wbiases,num_or_size_splits=4,axis=1) 
             elif self.wform == 'diagonal':
-                #W_concat = tf.concat([Wi,Wj,Wf,Wo], axis = 1)   
-                #U_concat = tf.concat([Ui,Uj,Uf,Uo], axis = 1)
-                #biases = tf.concat([bi,bj,bf,bo],axis=0) 
-    
-                #pdb.set_trace()
                 h_concat = tf.concat([h,h,h,h],axis=1)
-                #h_tile = tf.tile(h,[1,4])
 
                 W_res = tf.multiply(h_concat,mats[0])
 
@@ -117,17 +99,10 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
                 res_wbiases = tf.nn.bias_add(res, biases)
 
                 i,j,f,o = tf.split(res_wbiases,num_or_size_splits=4,axis=1) 
-                #Wi,Wj,Wf,Wo = tf.split(mats[0],num_or_size_splits=4,axis=1) 
 
-                #i,j = tf.add(i,tf.multiply(Wi,h)), tf.add(j,tf.multiply(Wj,h))
-                #f,o = tf.add(f,tf.multiply(Wf,h)), tf.add(o,tf.multiply(Wo,h))
             elif self.wform == 'constant':
-                #W_concat = tf.concat([Wi,Wj,Wf,Wo], axis = 1)   
-                #U_concat = tf.concat([Ui,Uj,Uf,Uo], axis = 1)
-                #biases = tf.concat([bi,bj,bf,bo],axis=0) 
-    
+                    
                 h_concat = tf.concat([h,h,h,h],axis=1)
-                #W_res = tf.multiply(h_concat,mats[0])
 
                 U_res = tf.matmul(inputs,mats)
 
@@ -136,121 +111,13 @@ class ModLSTMCell(tf.contrib.rnn.RNNCell):
 
                 i,j,f,o = tf.split(res_wbiases,num_or_size_splits=4,axis=1) 
 
-            ##the old implementation
-            #with tf.variable_scope("i"):  
-            #    i = self.get_nextstate(h,inputs) 
-            #with tf.variable_scope("j"):  
-            #    j = self.get_nextstate(h,inputs)
-            #with tf.variable_scope("f"):  
-            #    f = self.get_nextstate(h,inputs)
-            #with tf.variable_scope("o"):  
-            #    o = self.get_nextstate(h,inputs)
-
+            
             new_c = (c * tf.nn.sigmoid(f) + tf.nn.sigmoid(i)*tf.nn.tanh(j))
 
             new_h = tf.nn.tanh(new_c) * tf.nn.sigmoid(o)
             new_state = tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
         return new_h, new_state
 
-    def get_nextstate(self, state, x):
-
-        if self.wform == 'full':
-            W = tf.get_variable("W", shape = [self._num_units, self._num_units], initializer = self.init )   
-            Wh = tf.matmul(state,W)   
-        elif self.wform == 'diagonal':
-            with tf.variable_scope("Wdiag"):
-                W = tf.get_variable("W", 
-                        shape = [self._num_units], 
-                        initializer = self.init )   
-            Wh = tf.multiply(W,state)
-        elif self.wform == 'scalar':
-            W = tf.get_variable("W", shape = [1], initializer = self.init ) 
-            Wh = W*state
-        elif self.wform == 'constant':    
-            Wh = state
-        elif self.wform == 'diag_to_full':
-            #get the current variable scope
-            var_scope = tf.get_variable_scope().name.replace('rnn2/','')
-
-            #first filtering 
-            vars_to_use = [var for var in self.init if var_scope in var[0]]  
-
-            #next, assign the variables   
-            for var in vars_to_use:
-                if '/W' in var[0]:
-                    Wfull = np.diag(var[1])
-                    init = tf.constant_initializer(Wfull)
-
-                    W = tf.get_variable("Wfull",
-                        shape = [self._num_units,self._num_units], 
-                        initializer = init) 
-                elif '/U' in var[0]:
-                    init = tf.constant_initializer(var[1])
-
-                    U_shape = [x.get_shape().as_list()[1], self._num_units] 
-                    U = tf.get_variable("U", shape = U_shape, initializer = init) 
-                elif '/b' in var[0]:
-                    init = tf.constant_initializer(var[1])
-            
-                    b = tf.get_variable("b", 
-                            shape = [self._num_units], initializer = init)
-        
-            #finally compute Wh
-            Wh = tf.matmul(state,W) 
-
-        if self.wform != 'diag_to_full':
-            U_shape = [x.get_shape().as_list()[1], self._num_units] 
-            U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
-            b = tf.get_variable("b", shape = [self._num_units], initializer = self.init)
-        
-        Ux = tf.matmul( x, U)  
-        next_state = Wh + Ux + b
-
-        return next_state 
-
-    def get_params(self):
-        if self.wform == 'full':
-            W = tf.get_variable("W", shape = [self._num_units, self._num_units], 
-                    initializer = self.init )   
-        elif self.wform == 'diagonal':
-            W = tf.get_variable("W", shape = [1,self._num_units], 
-                    initializer = self.init )   
-        elif self.wform == 'scalar':
-            W = tf.get_variable("W", shape = [1], initializer = self.init ) 
-        elif self.wform == 'diag_to_full':
-            #get the current variable scope
-            var_scope = tf.get_variable_scope().name.replace('rnn2/','')
-
-            #first filtering 
-            vars_to_use = [var for var in self.init if var_scope in var[0]]  
-
-            #next, assign the variables   
-            for var in vars_to_use:
-                if '/W' in var[0]:
-                    Wfull = np.diag(var[1])
-                    init = tf.constant_initializer(Wfull)
-
-                    W = tf.get_variable("Wfull",
-                        shape = [self._num_units,self._num_units], 
-                        initializer = init) 
-                elif '/U' in var[0]:
-                    init = tf.constant_initializer(var[1])
-
-                    U_shape = [self.L1, self._num_units] 
-                    U = tf.get_variable("U", shape = U_shape, initializer = init) 
-                elif '/b' in var[0]:
-                    init = tf.constant_initializer(var[1])
-            
-                    b = tf.get_variable("b", 
-                            shape = [self._num_units], initializer = init)
-
-
-        if self.wform != 'diag_to_full':
-            U_shape = [self.L1, self._num_units] 
-            U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
-            b = tf.get_variable("b", shape = [self._num_units], initializer = self.init)
-
-            return W,U,b
 
     def get_params_parallel(self):
         if self.wform == 'full':
@@ -394,28 +261,6 @@ class GatedWFCell(tf.contrib.rnn.RNNCell):
             new_h = tf.nn.tanh(cand)*(1-f) + f*state 
         return new_h, new_h
 
-    def get_nextstate(self, state, x):
-        if self.wform == 'full':
-            W = tf.get_variable("W", shape = [self._num_units, self._num_units], initializer = self.init )   
-            Wh = tf.matmul(state,W)   
-        elif self.wform == 'diagonal':
-            W = tf.get_variable("W", shape = [self._num_units], initializer = self.init )   
-            Wh = W*state
-        elif self.wform == 'scalar':
-            W = tf.get_variable("W", shape = [1], initializer = self.init ) 
-            Wh = W*state
-        elif self.wform == 'constant':    
-            Wh = state
-
-        U_shape = [x.get_shape().as_list()[1], self._num_units] 
-        U = tf.get_variable("U", shape = U_shape, initializer = self.init) 
-        b = tf.get_variable("b", shape = [self._num_units], initializer = self.init)
-        
-        Ux = tf.matmul( x, U)  
-        next_state = Wh + Ux + b
-
-        return next_state 
-
     def get_params_parallel(self):
         if self.wform == 'full':
             mats = tf.get_variable("mats", 
@@ -438,69 +283,15 @@ class GatedWFCell(tf.contrib.rnn.RNNCell):
 
         return mats, biases 
 
-class GatedWCell(tf.contrib.rnn.RNNCell):
-    """Gated W cell """
 
-    def __init__(self, num_units, initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32), wform = 'diagonal'):
-        self._num_units = num_units
-        self.init = initializer
-        self.wform = wform
-
-    @property
-    def state_size(self):
-        return self._num_units
-
-    @property
-    def output_size(self):
-        return self._num_units
-
-    def __call__(self, inputs, state, scope=None):
-        with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
-            with tf.variable_scope("Gate"):  # Reset gate and update gate.
-                U_shape = [inputs.get_shape().as_list()[1], self._num_units] 
-
-                init = self.init
-                Uw = tf.get_variable("Uw", shape = U_shape, initializer = init )
-                bw = tf.get_variable("bw", shape = [self._num_units], initializer = init)
-                if self.wform == 'constant': 
-                    w = tf.nn.sigmoid( state + tf.matmul( inputs, Uw) + bw) 
-                elif self.wform == 'scalar': 
-                    Ww = tf.get_variable("Ww", shape = [1], initializer = init) 
-                    w = tf.nn.sigmoid( Ww*state + tf.matmul( inputs, Uw) + bw) 
-                elif self.wform == 'diagonal':
-                    Ww = tf.get_variable("Ww", shape = [self._num_units], initializer=init) 
-                    w = tf.nn.sigmoid( Ww*state + tf.matmul( inputs, Uw) + bw) 
-                elif self.wform == 'full':
-                    Ww = tf.get_variable("Ww", shape = [self._num_units,self._num_units], initializer = init)
-                    w = tf.nn.sigmoid( tf.matmul(state,Ww) + tf.matmul(inputs, Uw) + bw) 
-
-            with tf.variable_scope("Candidate"):
-                U = tf.get_variable("U", shape = U_shape, initializer = init)
-                b1 = tf.get_variable("b1", shape = [self._num_units], initializer = init ) 
-                if self.wform == 'constant':
-                    new_h =  tf.nn.tanh( state + w*tf.matmul( inputs, U  ) + b1 )  
-                elif self.wform == 'scalar':
-                    W = tf.get_variable("W", shape = [1], initializer = init)
-                    new_h = tf.nn.tanh( W*state + w*tf.matmul( inputs, U  ) + b1 )  
-                elif self.wform == 'diagonal':
-                    W = tf.get_variable("W", shape = [self._num_units], initializer = init)
-                    new_h = tf.nn.tanh( W*state + w*tf.matmul( inputs, U  ) + b1 )  
-                elif self.wform == 'full':
-                    W = tf.get_variable("W", shape = [self._num_units,self._num_units], initializer = init)
-                    new_h = tf.nn.tanh( tf.matmul(state,W) + w*tf.matmul( inputs, U  ) + b1 )  
- 
-                    
-                
-        return new_h, new_h
-
-# Start class definition
 class rnn(object):
+    """This class has the build_graph function  that builds the rnn computation graph, and the optimizer that optimizes the model parameters given the graph handle and the data""" 
     def __init__(self, model_specs, initializer = 'xavier'):
         'model specs is a dictionary'
         self.model_specs = model_specs
         self.initializer = initializer
     
-    def build_graph(self ): 
+    def build_graph(self): 
         'this function builds a graph with the specifications in self.model_specs'
         
         d = self.model_specs #unpack the model specifications
@@ -552,8 +343,7 @@ class rnn(object):
                 masked_cost = tf.reduce_sum(temp_cost,1)*mask 
                 cost = tf.reduce_mean( masked_cost )  
 
-                #define the optimizer
-            #with tf.variable_scope(self.model_specs['wform'], reuse = False):
+            #define the optimizer
             if d['optimizer'] == 'Adam':
                 train_step = tf.train.AdamOptimizer(d['LR']).minimize(cost)
             elif d['optimizer'] == 'RMSProp':
@@ -595,15 +385,14 @@ class rnn(object):
                              'logl':logl}
                                            
                              
-
             return graph_handles
 
 
     def define_model(self, x, seqlens ,dropout_kps = tf.constant([1,1])):  
         p1 = dropout_kps[0]
         p2 = dropout_kps[1]
-        onedir_models = ['lstm','gru', 'gated_w', 'vanilla_rnn', 
-                            'gated_wf', 'mod_lstm','mod_rnn']
+        onedir_models = ['lstm','gru', 'gated_w', 'vanilla_rnn',  
+                            'gated_wf', 'mod_lstm','mod_rnn'] #gated_w is to be implemented
         bidir_models = ['bi_lstm', 'bi_mod_lstm', 'bi_gated_w', 'bi_gated_wf' ]
        
         # unpack model specifications 
@@ -739,68 +528,8 @@ class rnn(object):
             return yhat 
 
 
-
-        elif model == 'multi_layer_ff':
-            #deprecated
-            
-            if not(train_mode):
-                tf.get_variable_scope().reuse_variables()
-
-            initializer = tf.contrib.layers.xavier_initializer(uniform=True, seed=2, dtype=tf.float32)
-            with tf.variable_scope("first_layer"):
-                V1 = tf.get_variable("V1", dtype = tf.float32, shape = [self.K, self.L], initializer = initializer ) 
-                b1 = tf.get_variable("b1", dtype = tf.float32, shape = [self.K,1], initializer = initializer)
-            with tf.variable_scope("second_layer"):
-                V2 = tf.get_variable("V2", dtype = tf.float32, shape = [self.K, self.K], initializer = initializer ) 
-                b2 = tf.get_variable("b2", dtype = tf.float32, shape = [self.K,1], initializer = initializer)
-
-            with tf.variable_scope("output_layer"):
-                V = tf.get_variable("V", dtype= tf.float32, shape = [self.L2, self.K ], initializer = initializer)  
-                b = tf.get_variable("b", dtype= tf.float32, shape = [self.L2, 1 ], initializer = initializer)  
-
-            h1 = tf.tanh(tf.matmul(V1,x) + b1)
-            h1 = tf.nn.dropout(h1, 0.75, noise_shape=None, seed=None, name=None)
-
-            h2 = tf.tanh(tf.matmul(V2,h1) + b2) 
-            h2 = tf.nn.dropout(h2, 0.75, noise_shape=None, seed=None, name=None)
-
-            yhat = tf.matmul(V, h2) + b#tf.reshape(b, (self.L2,1))
-            return yhat
-
-
-
-        elif model == 'vector_w_conv':
-            #heavily deprecated
-            K = self.K
-            T = self.T
-            ntaps = self.ntaps
-
-            Ux = (tf.matmul(self.U,x))
-            
-            #flip Ux
-            Ux_flip = fliplr(Ux)
-            Ux_flip_pad = tf.concat(1, [Ux_flip, tf.zeros( [K, ntaps -1 ] )] )  
-
-            Uxt = tf.transpose(Ux_flip_pad) 
-            Uxr = tf.reshape(Uxt,[1, 1, T + ntaps - 1, K])
-            
-            wt = tf.transpose(self.w)
-            wr = tf.reshape(wt,[1, ntaps, K, 1])
-            Z = tf.nn.depthwise_conv2d(Uxr, wr, strides=[1,1,1,1], padding = 'VALID')
-
-            Z = fliplr(tf.transpose(tf.squeeze(Z))) + self.b1 
-            Hhat = tf.tanh( Z ) 
-            
-            Yhat = tf.nn.softmax( tf.matmul( self.V, Hhat ) + self.b2  ,dim=0 )
-            
-            # Transpose and flip
-            #y_hat = fliplr( tf.transpose(tf.reshape( y, [Uxth,Uxtw])))
-            return Yhat
-            
-
     def optimizer(self, data, rnn_handles, sess, model_n = 1):
-        #if model_n == 2:
-        #    rnn_handles['saver'].restore(sess,'first_model.index') 
+        """This function runs the optimizer for the given data and given rnn graph referenced by rnn_handles """
 
         d = self.model_specs # unpack the variables 
         iterator_dict = {'BucketedDataIterator':BucketedDataIterator,
@@ -810,9 +539,6 @@ class rnn(object):
                 num_buckets = d['num_buckets'])
         tst = SimpleDataIterator(data['Test'])
         valid = SimpleDataIterator(data['Validation'])
-
-        #run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-        #run_metadata = tf.RunMetadata()
 
         all_times, tr_logls, test_logls, valid_logls = [], [], [], [] 
         for ep in range(d['EP']):
@@ -835,12 +561,6 @@ class rnn(object):
                         rnn_handles['train_step']], feed) 
                 tr_logl.append(tr_logl_temp)
                 
-                #for profiling
-                #tl = timeline.Timeline(run_metadata.step_stats)
-                #ctf = tl.generate_chrome_trace_format()
-                #with open('timeline.json', 'w') as f:
-                #    f.write(ctf)
-
                 if d['verbose']:
                     print("Training cost = ", tr_cost, 
                           " Training Accuracy = ", tr_logl_temp)
@@ -882,343 +602,49 @@ class rnn(object):
             test_logls.append(tst_logl)
             valid_logls.append(vld_logl)
 
-        
-        preds = sess.run( tf.nn.sigmoid(rnn_handles['preds']), tst_feed)
-        relevant_inds = sess.run( rnn_handles['relevant_inds'], tst_feed)
-        targets = sess.run( rnn_handles['targets'] ,tst_feed) 
-        #logl = sess.run( rnn_handles['logl'] ,tst_feed) 
-
-        eps = 1e-10
-        np_logl = np.sum(targets*np.log(preds + eps) + (1-targets)*np.log( 1-preds + eps ),1) 
-        np.save('check_nplogl',{'nplogl':np.mean(np_logl), 'tflogl':tst_logl}) 
-        #pdb.set_trace()
-
-        #if model_n == 1: 
-        #    rnn_handles['saver'].save(sess, 'first_model') 
 
         return all_times, tr_logls, test_logls, valid_logls
 
     def save_modelvars_np(self, sess):
+        """ This function saves the variables in diagonal to full transition """ 
 
         variables = tf.trainable_variables()
         vars_np = [(var.name,sess.run(var)) for var in variables]
 
         return vars_np 
 
-    def tfgenerate_text(self, sess, Tseq = 100, x = None): 
-        L = self.L
-        E = np.eye(L) 
-        
-        y = np.zeros((L,Tseq) ) 
-        y_probs = np.zeros((L,Tseq))
-        y_init = E[:,np.random.choice(L)].reshape(L,1)   
-        state = None
-        for t in range(Tseq):
-            if state == None:
-                if x == None:
-                    feed_dict = { self.xtest: y_init }
-                else: 
-                    feed_dict = { self.xtest: x[:, t:t+1] } 
-
-            else:
-                if x == None:
-                    feed_dict = {self.xtest: y[:,t-1:t], self.state: state} 
-                else:
-                    feed_dict = {self.xtest: x[:, t:t+1], self.state: state }
-           
-            pnext,state = sess.run( [self.ytest, self.nstate], feed_dict ) 
-            
-            y_probs[:,t] = pnext.squeeze()
-
-            if self.outstage == 'softmax':
-                y[:,t] = E[:,np.random.choice(L, p = pnext.squeeze())]
-            elif self.outstage == 'sigmoid':
-                y[:,t] = (np.random.rand(L) < pnext.squeeze())    
-            elif self.outstage == 'linear':
-                y[:,t] = pnext.squeeze()
-
-
-        eps = 1e-9
-        if not(x == None):
-            
-            if self.outstage == 'softmax':
-                log2bpc = np.sum( x[:,1:Tseq+1]*np.log2(y_probs + eps)  )/Tseq
-
-                logl = log2bpc 
-            else:
-                logl = np.sum(  x[:,1:Tseq+1]*np.log(y_probs+eps) + (1-x[:,1:Tseq+1])*np.log(1-y_probs +eps))
-            
-            
-        else:
-            logl = None
-
-        return y, logl 
-
-    def generate_text(self, T_seq, x = None, case = 'vector_w_conv'):
-        
-        if case == 'vector_w_conv':
-            U = self.U.eval() 
-            V = self.V.eval()
-            b1 = self.b1.eval()
-            b2 = self.b2.eval()
-            w = self.w.eval()
-            
-            K = self.K 
-            L = self.L 
-            ntaps = self.ntaps
-            #w = np.zeros(( K, ntaps ) ) 
-            #w[:,0:27] = self.w.eval()[:,23:]
-            #w[:,27:] = self.w.eval()[:,0:23]
-            #iw[:,
-            #for k in range(K):
-            #    for n in range(ntaps):
-            #        w[k, n] = self.w.eval()[0, n, k, 0] 
-
-            h = np.zeros((K, T_seq))
-            y = np.zeros((L, T_seq))
-           
-            E = np.eye(L)
-            if x == None:
-                burnin = 50 
-                y[:,0:burnin] = E[:, np.random.choice(L, burnin )] 
-            else: 
-                burnin = 0 
-            #pdb.set_trace()    
-
-
-            for t in range(burnin, T_seq):
-                for n in range(0, np.min( [ntaps, t+1])):
-                    if x == None:
-                        h[:,t] = h[:,t] + w[:,n]*np.dot(U, y[:, t-n-1] )
-                    else:    
-                        h[:,t] = h[:,t] + w[:,n]*np.dot(U, x[:,t-n] ) 
-                h[:,t] = h[:,t] + np.squeeze(b1)
-                y[:,t] = infinite_tap_rnn.softmax(  np.dot(V, np.tanh(h[:,t])) + np.squeeze(b2) )
-            return y
 
 def return_Klimits(model, wform, data):
     """We use this function to select the upper and lower limits of number of 
     hidden units per layer depending on the task and the dataset. The user can also choo    se to limit the upper and lower limit of allowable number of trainable parameters"""
 
-    if data == 'JSB Chorales':
-        min_params = 1e1; max_params = 14e6 
-        if (model == 'mod_lstm') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 300 
-        elif (model == 'mod_lstm') & (wform == 'full'):    
-            K_min = 50; K_max = 300 
-        elif (model == 'mod_lstm') & (wform == 'diag_to_full'):    
-            K_min = 50; K_max = 300 
-        elif (model == 'mod_lstm') & (wform == 'constant'):
-            K_min = 176; K_max = 441
-        elif (model == 'mod_lstm') & (wform == 'scalar'):
-            K_min = 176; K_max = 441
+    if model == 'mod_lstm':
+        min_params = 1e1; max_params =  7e7 # in our waspaa paper we basically did not use lower and upper bounds for number of parameters
+        K_min, K_max = 50, 300   
 
-        elif (model == 'gated_w') & (wform == 'diagonal'):    
-            K_min = 252; K_max = 635 
-        elif (model == 'gated_w') & (wform == 'full'):    
-            K_min = 164; K_max = 374 
-        elif (model == 'gated_w') & (wform == 'constant'):
-            K_min = 253; K_max = 635 
-        elif (model == 'gated_w') & (wform == 'scalar'):    
-            K_min = 253; K_max = 635
-        
-        elif (model == 'gated_wf') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'full'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'constant'):   #these seem to be fine also 
-            K_min = 204; K_max = 512 
-        elif (model == 'gated_wf') & (wform == 'scalar'):    
-            K_min = 204; K_max = 512 
-
-        elif model == 'mod_rnn' and wform == 'full':
-            K_min, K_max = 50, 400
-        elif model == 'mod_rnn' and wform == 'diagonal':
-            K_min, K_max = 50, 400
-
-
-
-    elif data == 'Piano-midi.de':
+    elif model == 'gated_wf': #this is essentially gru
         min_params = 1e1; max_params = 7e7 
-
-        if (model == 'mod_lstm') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 300 
-        elif (model == 'mod_lstm' or model == 'lstm') & (wform == 'full'):    
-            K_min = 50; K_max = 300
-        elif (model == 'mod_lstm') & (wform == 'constant'):    
-            K_min = 276; K_max = 560 
-        elif (model == 'mod_lstm') & (wform == 'scalar'):    
-            K_min = 276; K_max = 560 
-
-        elif (model == 'gated_w') & (wform == 'diagonal'):    
-            K_min = 385; K_max = 775 
-        elif (model == 'gated_w') & (wform == 'full'):    
-            K_min = 251; K_max = 462
-        elif (model == 'gated_w') & (wform == 'constant'):
-            K_min = 394; K_max = 791
-        elif (model == 'gated_w') & (wform == 'scalar'):    
-            K_min = 394; K_max = 791
-
-        elif (model == 'gru') & (wform == 'full'):    
-            K_min = 50; K_max = 400
-
-
-        elif (model == 'gated_wf') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 350 
-        elif (model == 'gated_wf') & (wform == 'full'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'constant'):   #these seem to be fine also 
-            K_min = 313; K_max = 630 
-        elif (model == 'gated_wf') & (wform == 'scalar'):    
-            K_min = 313; K_max = 630 
-
-        elif model == 'mod_rnn' and wform == 'full':
-            K_min, K_max = 50, 400
-        elif model == 'mod_rnn' and wform == 'diagonal':
-            K_min, K_max = 50, 400
-
-        
-
-    elif data == 'Nottingham':
-        min_params = 1e1; max_params = 15e6 
-
-        if (model == 'mod_lstm') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 300#268,540 
-        elif (model == 'mod_lstm') & (wform == 'full'):    
-            K_min = 50; K_max = 300
-        elif (model == 'mod_lstm') & (wform == 'constant'):    
-            K_min = 203; K_max = 510#268,540 
-        elif (model == 'mod_lstm') & (wform == 'scalar'):    
-            K_min = 203; K_max = 510#268,540 
-
-
-        elif (model == 'gated_w') & (wform == 'diagonal'):  #seems ok 
-            K_min = 290; K_max = 730
-        elif (model == 'gated_w') & (wform == 'full'):    
-            K_min = 190; K_max = 432
-        elif (model == 'gated_w') & (wform == 'constant'):  #seems ok 
-            K_min = 290; K_max = 730
-        elif (model == 'gated_w') & (wform == 'scalar'):  #seems ok 
-            K_min = 290; K_max = 730
-
-
-        elif (model == 'gated_wf') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 350 
-        elif (model == 'gated_wf') & (wform == 'full'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'constant'):  #seems ok 
-            K_min = 236; K_max = 592
-        elif (model == 'gated_wf') & (wform == 'scalar'):  #seems ok 
-            K_min = 236; K_max = 592
-
-        
-        elif model == 'mod_rnn' and wform == 'full':
-            K_min, K_max = 50, 400
-        elif model == 'mod_rnn' and wform == 'diagonal':
-            K_min, K_max = 50, 400
-
-
-
-    elif data == 'MuseData':
-        min_params = 1e1; max_params = 14e6 
-
-        if (model == 'mod_lstm') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 300
-        elif (model == 'mod_lstm') & (wform == 'full'):    
-            K_min = 50; K_max = 300
-        elif (model == 'mod_lstm') & (wform == 'constant'):    
-            K_min = 268; K_max = 540
-        elif (model == 'mod_lstm') & (wform == 'scalar'):    
-            K_min = 268; K_max = 540
-
-
-        elif (model == 'gated_w') & (wform == 'diagonal'):    
-            K_min = 385; K_max = 775 
-        elif (model =='gated_w') & (wform == 'full'):    
-            K_min = 251; K_max = 462
-        elif (model == 'gated_w') & (wform == 'constant'):    
-            K_min = 385; K_max = 775 
-        elif (model == 'gated_w') & (wform == 'scalar'):    
-            K_min = 385; K_max = 775 
-
-
-        elif (model == 'gated_wf') & (wform == 'diagonal'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'full'):    
-            K_min = 50; K_max = 350
-        elif (model == 'gated_wf') & (wform == 'constant'):    
-            K_min = 312; K_max = 629
-        elif (model == 'gated_wf') & (wform == 'scalar'):    
-            K_min = 312; K_max = 629
-
-        
-        elif model == 'mod_rnn' and wform == 'full':
-            K_min, K_max = 50, 400
-        elif model == 'mod_rnn' and wform == 'diagonal':
-            K_min, K_max = 50, 400
-
-
-    elif data == 'mnist':
-        min_params = 1e1; max_params = 15e6 
-
-        if (model == 'bi_mod_lstm') & (wform == 'diagonal'):
-            K_min = 40; K_max = 250
-        elif (model in ['bi_mod_lstm','bi_lstm']) & (wform == 'full'):    
-            K_min = 40; K_max = 250
-        elif (model == 'bi_mod_lstm') & (wform == 'diag_to_full'):
-            K_min = 40; K_max = 250
-
-        
-        elif (model == 'bi_gated_w') & (wform == 'diagonal'):
-            K_min = 50; K_max = 500
-        elif (model == 'bi_gated_w') & (wform == 'full'):    
-            K_min = 40; K_max = 300
-
-        elif (model == 'bi_gated_wf') & (wform == 'diagonal'):
-            K_min = 50; K_max = 410
-        elif (model == 'bi_gated_wf') & (wform == 'full'):    
-            K_min = 40; K_max = 250
-
-    elif data == 'timit':
-        min_params = 1e1; max_params = 15e6 
-
-        if (model == 'bi_mod_lstm') & (wform == 'diagonal'):
-            K_min = 150; K_max = 250 
-        elif (model in ['bi_mod_lstm','bi_lstm']) & (wform == 'full'):    
-            K_min = 250; K_max = 300 
-        elif (model == 'bi_mod_lstm') & (wform == 'diag_to_full'):
-            K_min = 250; K_max = 300
-        elif (model == 'bi_mod_lstm') & (wform == 'constant'):
-            K_min = 50; K_max =50 
-
-
-        
-        elif (model == 'bi_gated_w') & (wform == 'diagonal'):
-            K_min = 50; K_max = 500
-        elif (model == 'bi_gated_w') & (wform == 'full'):    
-            K_min = 40; K_max = 300
-
-        elif (model == 'bi_gated_wf') & (wform == 'diagonal'):
-            K_min = 50; K_max = 410
-        elif (model == 'bi_gated_wf') & (wform == 'full'):    
-            K_min = 40; K_max = 250
-
-        elif model == 'multi_layer_ff':
-            min_params = 1e4; max_params = 3e6
-            K_min = 100; K_max = 1000
+        K_min, K_max = 50, 350
+   
+    elif model == 'mod_rnn':
+        min_params = 1e1; max_params = 7e7 
+        K_min, K_max = 50, 400
 
     return K_min, K_max, min_params, max_params 
 
 def generate_random_hyperparams(lr_min, lr_max, K_min, K_max, num_layers_min, num_layers_max,load_hparams):
+    """This function generates random hyper-parameters for hyperparameter search"""
 
+    #this is for new random parameters
     if not load_hparams[0]:
         lr_exp = np.random.uniform(lr_min, lr_max)
         lr = 10**(lr_exp)
         K = np.random.choice(np.arange(K_min, K_max+1),1)[0]
         num_layers = np.random.choice(np.arange(num_layers_min, num_layers_max + 1),1)[0]
         #momentum_exp = np.random.uniform(-8,0) 
-        momentum = np.random.uniform(0,1)#(2**momentum_exp)
+        momentum = np.random.uniform(0,1) #(2**momentum_exp)
 
+    #this loads hyperparameters from an existing file
     else:
         exp_data = np.load('experiment_data/nmf_data_timit_model_bi_mod_lstm_diag_to_full_device_cpu:0_1490813245.npy')[load_hparams[1]]
         lr = exp_data['LR']
@@ -1232,6 +658,7 @@ def generate_random_hyperparams(lr_min, lr_max, K_min, K_max, num_layers_min, nu
     return lr, K, num_layers, momentum
 
 def load_data(task, data):
+    """this function loads the data, and sets the associated parameters (such as output and input dimensionality and batchsize) according to the specified task, which are either text, music, speech or digits """
 
     if task == 'text':
         print('Task is text')
@@ -1272,14 +699,17 @@ def load_data(task, data):
         print('Loading Music task ' + data + ' data')
         filename = data + '.pickle'
 
+        #this if-else determines the maximum allowable sequence length depending on the dataset
         if data == 'JSB Chorales':
-            len_th = 991000
+            len_th = 99999 #basically no sequence chopping
         elif data == 'Piano-midi.de':
             len_th = 200
         elif data == 'Nottingham':
             len_th = 200
         elif data == 'MuseData':
             len_th = 200
+        else:
+            len_th = 9e9
 
         dataset = load_musicdata( filename, len_th ) 
          
@@ -1400,7 +830,7 @@ def load_data(task, data):
 
 class SimpleDataIterator():
     """
-    This class is adapted (ripped off) from r2rt.com 
+    This class is adapted (ripped off) from r2rt.com, in this version, the next_batch function uses a pandas dataframe, and outputs the batch in a reshaped format ready to input to the tensorflow function 
     """
     def __init__(self, df, num_buckets = None):
         self.df = df
@@ -1475,6 +905,7 @@ class SimpleDataIterator():
 
 
 class BucketedDataIterator():
+    """This one is the bucketed version of the simple data iterator, that is the sequences are ordered and put into buckets to minimize the total padding"""
     def __init__(self, df, num_buckets = 2):
         df = df.sort_values('lengths').reset_index(drop=True)
         self.size = len(df) / num_buckets
@@ -1573,7 +1004,7 @@ class BucketedDataIterator():
         return data, labels, mask, lengths 
 
 def load_multiple_textdata(filenames):
-    'This file reads multiple text files given in filenames, and it returns a list containing the one hot coded representation of these files'
+    """This file reads multiple text files given in filenames, and it returns a list containing the one hot coded representation of these files"""
     nfiles = len(filenames)
     f = [open(filenames[i],'r') for i in range(nfiles)] 
 
@@ -1594,6 +1025,7 @@ def load_multiple_textdata(filenames):
 
 
 def load_musicdata(fl, len_th):
+    """this function is used to load the symbolic music files in piano roll format"""
 
     filename = open(fl,'rb')
     dataset = pickle.load(filename)
@@ -1640,13 +1072,6 @@ def load_musicdata(fl, len_th):
             
     return sets
 
-
-def reconstruct_text(mat,fmapping):
-    reclist = []
-    for j in range(mat.shape[1]):
-        arg = np.argmax(mat[:,j])
-        reclist.append(fmapping[arg])
-    return ''.join(reclist)    
 
 class Error(Exception):
     pass
