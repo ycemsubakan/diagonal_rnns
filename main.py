@@ -168,26 +168,26 @@ def main(dictionary):
 
 
 #import matplotlib.pyplot as plt
-wform = 'diagonal'
-input_dictionary = {'seedin' : [1144, 1521], 
-            'task' : 'music', 
-            'data' : 'Nottingham',
-            'model': 'mod_rnn',
-            'wform': wform,
+wform = 'diagonal'# either diagonal or full
+input_dictionary = {'seedin' : [1144, 1521], #setting the random seed. First is for numpy, second is for tensorflow 
+            'task' : 'music', #this helps us how to load the data with the load_data function in rnns.py 
+            'data' : 'Nottingham', #the dataset, options are inside the load_data function 
+            'model': 'mod_rnn', #options are: mod_lstm (our custom cell), lstm (tensor flow's lstm cell), gated_wf (our custom gru cell), gru (tensor flow's gru cell), mod_rnn (our custom rnn cell) 
+            'wform' : wform, 
             'wform_global' : wform,
-            'num_configs' : 60, 
-            'start' : 0,  
-            'EP' : 300,
-            'dropout' : [0.9, 0.9],
-            'device' : 'gpu:1', 
+            'num_configs' : 60, #number of hyper parameter configurations to be tried 
+            'start' : 0,  #this is used to start from a certain point (can be useful with fixed seed, or when hyper-parameters are loaded) 
+            'EP' : 300, #number of epochs per run 
+            'dropout' : [0.9, 0.9], #first is the input second is the output keep probability 
+            'device' : 'gpu:1', #the device to be used in the computations 
             'server': socket.gethostname(),
-            'verbose': False,
+            'verbose': False, #this prints out the batch location
             'load_hparams': False, #this loads hyper-parameters from a results file
             'count_mode': False, #if this is True, the code will stop after printing the number of trainable parameters
-            'init':'xavier',
-            'lr_min':-4, 'lr_max':-2,
-            'num_layers_min':2, 'num_layers_max':3,
-            'optimizer':'RMSProp',
-            'notes':'I am trying RMS prop here. I am sampling momentums uniformly in this one. (This is what differs in this experiment from other RMSprop experiments) The upper limit for number of parameters is open. I am doing the gradient centralization thing also '}
+            'init':'xavier', #initialization method, options are 'xavier','random_unform' 
+            'lr_min':-4, 'lr_max':-2, #the lower and upper limits for the exponent of the learning rate
+            'num_layers_min':2, 'num_layers_max':3, #lower and upper limits for number of layers
+            'optimizer':'RMSProp', #options are, Adam, RMSProp, Adadelta
+            'notes':'notes regarding the experiment goes in here'}
 
 perfs = main(input_dictionary)
